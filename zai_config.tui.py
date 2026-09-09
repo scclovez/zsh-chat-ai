@@ -60,7 +60,7 @@ DEFAULTS = {
     "ZAI_API_KEY": "",
     "ZAI_MODEL": "deepseek-v4-flash",
     "ZAI_TEMPERATURE": "0.2",
-    "ZAI_TIMEOUT": "60",
+    "ZAI_TIMEOUT": "300",
     "ZAI_INTERCEPT": "1",
     "ZAI_MIN_INTERCEPT_LEN": "2",
     "ZAI_DESTRUCTIVE_POLICY": "warn",

@@ -234,7 +234,7 @@ _zai_api_call() {
   local payload=$1 model=$2 key=$3 quiet=${4:-0}
   local url timeout tmp code rc bar em
   url=$(_zai_var ZAI_API_URL https://api.deepseek.com/chat/completions)
-  timeout=$(_zai_var ZAI_TIMEOUT 60)
+  timeout=$(_zai_var ZAI_TIMEOUT 300)
   [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
   tmp=$(mktemp 2>/dev/null) || tmp="/tmp/zai_body.$$"
   bar="${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
@@ -249,7 +249,7 @@ _zai_api_call() {
   if (( rc )); then
     case $rc in
       7)  em="无法连接到 $url (网络/DNS?)" ;;
-      28) em="请求超时(超过 ${timeout}s)" ;;
+      28) em="请求超时(超过 ${timeout}s): 思考/生成过长被中断; 可调大: export ZAI_TIMEOUT=600 后重试" ;;
       60) em="SSL 证书校验失败" ;;
       *)  em="curl 错误码 $rc" ;;
     esac
@@ -380,7 +380,7 @@ _zai_api_stream() {
   local raw ct line
   local -i rc
   url=$(_zai_var ZAI_API_URL https://api.deepseek.com/chat/completions)
-  timeout=$(_zai_var ZAI_TIMEOUT 60)
+  timeout=$(_zai_var ZAI_TIMEOUT 300)
   [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
   rawf=$(mktemp 2>/dev/null)   || rawf="/tmp/zai_raw.$$"
   codef=$(mktemp 2>/dev/null)  || codef="/tmp/zai_code.$$"
@@ -400,8 +400,15 @@ _zai_api_stream() {
         -H "Authorization: Bearer $key" \
         --data "$payload" \
         -w $'\n%{http_code}\n' "$url" 2>/dev/null; print -r -- "EXIT:$?")
-    (( _zai_s_res_done )) || _zai_think_close   # 流结束仍未出结果(纯思考/异常): 同样收起
-    (( _zai_s_bar )) && print -rn -- $'\r\e[2K'"${_zai_c_rst}" # 全程没显示思考 → 抹掉占位行
+    # 流结束仍未出结果: 显示过思考(超时/中断) → 保留思考便于查看, 不整块清除; 只复位颜色
+    if (( ! _zai_s_res_done )); then
+      if (( _zai_s_bar )); then
+        print -rn -- $'\r\e[2K'"${_zai_c_rst}"   # 全程只显示过占位行 → 抹掉
+      else
+        print -rn -- "${_zai_c_rst}"
+        print -r -- ""                            # 思考被中断: 留空一行再输出错误
+      fi
+    fi
     print -r -- "$_zai_s_raw"  > "$rawf"
     print -r -- "$_zai_s_code" > "$codef"
     print -r -- "$_zai_s_err"  > "$errf"
@@ -415,7 +422,7 @@ _zai_api_stream() {
   if (( rc )); then
     case $rc in
       7)  em="无法连接到 $url (网络/DNS?)" ;;
-      28) em="请求超时(超过 ${timeout}s)" ;;
+      28) em="请求超时(超过 ${timeout}s): 思考/生成过长被中断; 可调大: export ZAI_TIMEOUT=600 后重试" ;;
       60) em="SSL 证书校验失败" ;;
       *)  em="curl 错误码 $rc" ;;
     esac
@@ -1474,7 +1481,7 @@ _zai_config_tui() {
     --arg key "$(_zai_var ZAI_API_KEY '')" \
     --arg m  "$(_zai_var ZAI_MODEL deepseek-v4-flash)" \
     --arg temp "$(_zai_var ZAI_TEMPERATURE 0.2)" \
-    --arg to  "$(_zai_var ZAI_TIMEOUT 60)" \
+    --arg to  "$(_zai_var ZAI_TIMEOUT 300)" \
     --arg intc "$(_zai_var ZAI_INTERCEPT 1)" \
     --arg ml  "$(_zai_var ZAI_MIN_INTERCEPT_LEN 2)" \
     --arg pol "$(_zai_var ZAI_DESTRUCTIVE_POLICY warn)" \
