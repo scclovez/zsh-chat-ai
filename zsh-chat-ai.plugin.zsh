@@ -53,7 +53,7 @@ _zai_config_path() {
 # 允许从配置文件读取/写入的键
 _zai_allowed_cfg=(ZAI_API_URL ZAI_API_KEY ZAI_MODEL ZAI_TEMPERATURE ZAI_TIMEOUT \
   ZAI_INTERCEPT ZAI_MIN_INTERCEPT_LEN ZAI_DESTRUCTIVE_POLICY ZAI_AUTO_CONFIRM \
-  ZAI_STOP_ON_ERROR ZAI_DEBUG ZAI_INCLUDE_CONTEXT ZAI_HISTORY ZAI_LANG)
+  ZAI_STOP_ON_ERROR ZAI_DEBUG ZAI_INCLUDE_CONTEXT ZAI_HISTORY ZAI_LANG ZAI_STREAM)
 
 # 优先级: 环境变量/已在 shell 设好的参数 > 配置文件 > 内置默认。
 # 用 _zai_from_cfg 记住"来自文件"的键，使 ai -config 保存后能即时重载。
@@ -176,16 +176,18 @@ EOF
 # ---------------------------------------------------------------- API 调用
 _zai_build_payload() {
   emulate -L zsh
-  local model=$1 sys=$2 user=$3 temp=$4
+  local model=$1 sys=$2 user=$3 temp=$4 stream=${5:-false}
+  case $stream in true|false) ;; *) stream=false ;; esac
   jq -nc \
     --arg model "$model" \
     --arg sys "$sys" \
     --arg user "$user" \
     --argjson temp "$temp" \
+    --argjson stream "$stream" \
     '{model:$model,
       messages:[{role:"system", content:$sys},
                 {role:"user",   content:$user}],
-      temperature:$temp, stream:false,
+      temperature:$temp, stream:$stream,
       response_format:{type:"json_object"}}'
 }
 
@@ -226,6 +228,176 @@ _zai_api_call() {
   _zai_http_code=$code
   _zai_api_body=$(<"$tmp")
   rm -f "$tmp"
+  return 0
+}
+
+# ---------------------------------------------------------------- 流式调用(实时显示思考内容)
+# 请求 stream=true 后逐行读 SSE:
+#   - delta.reasoning_content(模型的思考) → 实时打印到终端(手动折行并记录占行数);
+#   - 第一个 delta.content(结果)到达 → 立刻把整块思考区清掉, 再走“展示→确认”。
+# 模型不返回思考时退化为原来的“思考中…”占位行; ZAI_STREAM=0 走上面的整包请求。
+_zai_field_raw() { # 取一行 JSON 里某字符串字段的“原文”(不反转义, 原样累积; 转义跨块也不破坏)
+  emulate -L zsh
+  local json=$1 field=$2 rest ch
+  local -i i n
+  _zai_fraw=''
+  rest=${json#*"\"$field\":\""}
+  [[ $rest == $json ]] && return 1
+  n=${#rest}
+  for (( i=1; i<=n; i++ )); do
+    ch=${rest[i]}
+    if [[ $ch == '\' ]]; then
+      _zai_fraw+="${ch}${rest[i+1]}"
+      (( i += 1 ))
+      continue
+    fi
+    [[ $ch == '"' ]] && return 0
+    _zai_fraw+=$ch
+  done
+  return 0
+}
+
+_zai_think_begin() { # 首个思考文本到达: 抹掉“思考中…”占位行, 开启思考区计数
+  emulate -L zsh
+  print -rn -- $'\r\e[2K'
+  _zai_s_bar=0
+  _zai_s_rows=0
+  _zai_s_col=0
+  _zai_s_w=${COLUMNS:-80}
+  (( _zai_s_w > 10 )) || _zai_s_w=80
+  _zai_s_cap=$(( ${LINES:-24} - 2 ))
+  (( _zai_s_cap > 2 )) || _zai_s_cap=2
+  _zai_s_clip=0
+  return 0
+}
+
+_zai_think_print() { # $1 追加一段思考文本: 手动折行, 精确记录占用行数(便于最后整体擦除)
+  emulate -L zsh
+  local s=$1 ch
+  local -i i w code
+  (( _zai_s_clip )) && return 0
+  for (( i=1; i<=${#s}; i++ )); do
+    ch=${s[i]}
+    if [[ $ch == $'\n' ]]; then
+      print -r -- ''
+      (( _zai_s_rows++ ))
+      if (( _zai_s_rows >= _zai_s_cap )); then _zai_s_clip=1; return 0; fi
+      _zai_s_col=0
+      continue
+    fi
+    code=$(( #ch ))
+    (( code > 126 )) && w=2 || w=1
+    if (( _zai_s_col + w > _zai_s_w )); then
+      print -r -- ''
+      (( _zai_s_rows++ ))
+      if (( _zai_s_rows >= _zai_s_cap )); then _zai_s_clip=1; return 0; fi
+      _zai_s_col=0
+    fi
+    print -rn -- "$ch"
+    (( _zai_s_col += w ))
+  done
+  return 0
+}
+
+_zai_think_close() { # 出结果/流结束: 光标回到思考区起点并向下清除, 思考内容即被“关掉”
+  emulate -L zsh
+  if (( _zai_s_rows > 0 )); then
+    print -rn -- $'\r' $'\e['"$_zai_s_rows"'A' $'\e[J'
+  elif (( _zai_s_col > 0 || _zai_s_clip )); then
+    print -rn -- $'\r\e[J'
+  fi
+  return 0
+}
+
+_zai_sse_line() { # 处理一行 SSE / 尾部哨兵; 状态存全局 _zai_s_* (在流式子 shell 内使用)
+  emulate -L zsh
+  local line=$1 data frag
+  case $line in
+    EXIT:<->) _zai_s_exit=${line#EXIT:}; return 0 ;;
+    <->)      _zai_s_code=$line;       return 0 ;;   # curl -w 追加的 http 码
+    ''|'data: [DONE]') return 0 ;;
+    'data: '*) ;;
+    *)  _zai_s_err+="${line}"$'\n'; return 0 ;;       # 非 SSE(HTTP 错误响应体等)
+  esac
+  data=${line#data: }
+  if _zai_field_raw "$data" reasoning_content || _zai_field_raw "$data" reasoning; then
+    frag=$_zai_fraw
+    if (( ! _zai_s_res_done )) && [[ -n $frag ]]; then
+      (( _zai_s_reason_on )) || { _zai_s_reason_on=1; _zai_think_begin }
+      _zai_think_print "$frag"
+    fi
+  fi
+  if _zai_field_raw "$data" content && [[ -n $_zai_fraw ]]; then
+    frag=$_zai_fraw
+    if (( ! _zai_s_res_done )); then
+      _zai_s_res_done=1
+      _zai_think_close    # 出结果 → 关掉思考内容
+    fi
+    _zai_s_raw+=$frag
+  fi
+  return 0
+}
+
+# 流式调用主流程: 成功后设 _zai_http_code / _zai_api_body(重组为旧格式便于 _zai_parse 复用)
+_zai_api_stream() {
+  emulate -L zsh
+  local payload=$1 model=$2 key=$3
+  local url timeout rawf codef errf rcbar bodyerr em
+  local raw ct line
+  local -i rc
+  url=$(_zai_var ZAI_API_URL https://api.deepseek.com/chat/completions)
+  timeout=$(_zai_var ZAI_TIMEOUT 60)
+  [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
+  rawf=$(mktemp 2>/dev/null)   || rawf="/tmp/zai_raw.$$"
+  codef=$(mktemp 2>/dev/null)  || codef="/tmp/zai_code.$$"
+  errf=$(mktemp 2>/dev/null)   || errf="/tmp/zai_err.$$"
+  rcbar=$(mktemp 2>/dev/null)  || rcbar="/tmp/zai_rc.$$"
+  _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
+  _zai_s_reason_on=0; _zai_s_res_done=0
+  _zai_s_rows=0; _zai_s_col=0; _zai_s_bar=1
+  print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+  (
+    # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
+    while IFS= read -r line; do
+      _zai_sse_line "$line"
+    done < <(curl -sS --max-time "$timeout" \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $key" \
+        --data "$payload" \
+        -w $'\n%{http_code}' "$url" 2>/dev/null; print -r -- "EXIT:$?")
+    (( _zai_s_res_done )) || _zai_think_close   # 流结束仍未出结果(纯思考/异常): 同样收起
+    (( _zai_s_bar )) && print -rn -- $'\r\e[2K' # 全程没显示思考 → 抹掉占位行
+    print -r -- "$_zai_s_raw"  > "$rawf"
+    print -r -- "$_zai_s_code" > "$codef"
+    print -r -- "$_zai_s_err"  > "$errf"
+    print -r -- "$_zai_s_exit" > "$rcbar"
+  )
+  rc=$(( $(<"$rcbar") ))
+  _zai_http_code=$(<"$codef")
+  raw=$(<"$rawf")
+  bodyerr=$(<"$errf")
+  rm -f "$rawf" "$codef" "$errf" "$rcbar"
+  if (( rc )); then
+    case $rc in
+      7)  em="无法连接到 $url (网络/DNS?)" ;;
+      28) em="请求超时(超过 ${timeout}s)" ;;
+      60) em="SSL 证书校验失败" ;;
+      *)  em="curl 错误码 $rc" ;;
+    esac
+    _zai_error "$em"
+    return 1
+  fi
+  if [[ -z $_zai_http_code ]]; then
+    _zai_error "请求失败(未收到 HTTP 响应)。"
+    return 1
+  fi
+  if [[ $_zai_http_code != 200 ]]; then
+    _zai_api_body=$bodyerr          # 交给 _zai_ask 按状态码提示
+    return 0
+  fi
+  # 成功: 把流式 content 原文(仍是 JSON 转义串)还原成 JSON 文本, 再包成旧格式响应体
+  ct=$(print -rn -- "\"$raw\"" | jq -r . 2>/dev/null)
+  _zai_api_body=$(jq -nc --arg c "$ct" '{choices:[{message:{content:$c}}]}')
   return 0
 }
 
@@ -418,7 +590,7 @@ _zai_ask() {
   req=${req//$'\n'/ }
   if [[ -z ${req//[[:space:]]/} ]]; then _zai_error "请求为空。用法: ai <自然语言>"; return 1; fi
 
-  local model key lang ctx sys user temp payload code body
+  local model key lang ctx sys user temp payload code body stream
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
   key=$(_zai_var ZAI_API_KEY "")
   [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
@@ -435,13 +607,19 @@ _zai_ask() {
   temp=$(_zai_var ZAI_TEMPERATURE 0.2)
   [[ $temp =~ ^-?[0-9]+([.][0-9]+)?$ ]] || temp=0.2
 
-  payload=$(_zai_build_payload "$model" "$sys" "$user" "$temp")
+  stream=true
+  (( $(_zai_var ZAI_STREAM 1) )) || stream=false
+  payload=$(_zai_build_payload "$model" "$sys" "$user" "$temp" "$stream")
   if (( $(_zai_var ZAI_DEBUG 0) )); then
     _zai_warn "== [debug] payload =="
     print -r -- "$(_zai_redact "$payload")"
   fi
 
-  _zai_api_call "$payload" "$model" "$key" || return 1
+  if [[ $stream == true ]]; then
+    _zai_api_stream "$payload" "$model" "$key" || return 1
+  else
+    _zai_api_call "$payload" "$model" "$key" || return 1
+  fi
   code=$_zai_http_code
   body=$_zai_api_body
   if (( $(_zai_var ZAI_DEBUG 0) )); then
