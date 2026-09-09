@@ -54,7 +54,7 @@ _zai_config_path() {
 _zai_allowed_cfg=(ZAI_API_URL ZAI_API_KEY ZAI_MODEL ZAI_TEMPERATURE ZAI_TIMEOUT \
   ZAI_INTERCEPT ZAI_MIN_INTERCEPT_LEN ZAI_DESTRUCTIVE_POLICY ZAI_AUTO_CONFIRM \
   ZAI_STOP_ON_ERROR ZAI_DEBUG ZAI_INCLUDE_CONTEXT ZAI_HISTORY ZAI_LANG ZAI_STREAM \
-  ZAI_PERSONA ZAI_MEMORY ZAI_SUMMARIZE)
+  ZAI_PERSONA ZAI_MEMORY ZAI_SUMMARIZE ZAI_SHOW_THINK)
 
 # 优先级: 环境变量/已在 shell 设好的参数 > 配置文件 > 内置默认。
 # 用 _zai_from_cfg 记住"来自文件"的键，使 ai -config 保存后能即时重载。
@@ -354,18 +354,24 @@ _zai_sse_line() { # 处理一行 SSE / 尾部哨兵; 状态存全局 _zai_s_* (�
     *)  _zai_s_err+="${line}"$'\n'; return 0 ;;       # 非 SSE(HTTP 错误响应体等)
   esac
   data=${line#data: }
-  if _zai_field_raw "$data" reasoning_content || _zai_field_raw "$data" reasoning; then
-    frag=$_zai_fraw
-    if (( ! _zai_s_res_done )) && [[ -n $frag ]]; then
-      (( _zai_s_reason_on )) || { _zai_s_reason_on=1; _zai_think_begin }
-      _zai_think_print "$frag"
+  if (( _zai_s_show )); then   # 展开模式才显示思考文本(默认折叠)
+    if _zai_field_raw "$data" reasoning_content || _zai_field_raw "$data" reasoning; then
+      frag=$_zai_fraw
+      if (( ! _zai_s_res_done )) && [[ -n $frag ]]; then
+        (( _zai_s_reason_on )) || { _zai_s_reason_on=1; _zai_think_begin }
+        _zai_think_print "$frag"
+      fi
     fi
   fi
   if _zai_field_raw "$data" content && [[ -n $_zai_fraw ]]; then
     frag=$_zai_fraw
     if (( ! _zai_s_res_done )); then
       _zai_s_res_done=1
-      _zai_think_close    # 出结果 → 关掉思考内容
+      if (( _zai_s_show )); then
+        _zai_think_close    # 展开模式: 出结果 → 关掉思考区
+      else
+        (( _zai_s_bar )) && { _zai_s_bar=0; print -rn -- $'\r\e[2K'"${_zai_c_rst}"; }
+      fi
     fi
     _zai_s_raw+=$frag
   fi
@@ -387,9 +393,14 @@ _zai_api_stream() {
   errf=$(mktemp 2>/dev/null)   || errf="/tmp/zai_err.$$"
   rcbar=$(mktemp 2>/dev/null)  || rcbar="/tmp/zai_rc.$$"
   _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
-  _zai_s_reason_on=0; _zai_s_res_done=0
+  _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0
   _zai_s_rows=0; _zai_s_col=0; _zai_s_bar=1
-  print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+  (( $(_zai_var ZAI_SHOW_THINK 0) )) && _zai_s_show=1
+  if (( _zai_s_show )); then
+    print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+  else
+    print -rn -- "${_zai_c_dim}zai: 思考中 ($model)… (思考链折叠, ZAI_SHOW_THINK=1 可展开)${_zai_c_rst}"
+  fi
   (
     # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
     while IFS= read -r line; do

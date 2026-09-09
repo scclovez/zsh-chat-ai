@@ -36,6 +36,7 @@ ORDER = [
     "ZAI_HISTORY",
     "ZAI_DEBUG",
     "ZAI_STREAM",
+    "ZAI_SHOW_THINK",
 ]
 
 LABELS = {
@@ -52,7 +53,8 @@ LABELS = {
     "ZAI_INCLUDE_CONTEXT": "发送系统上下文",
     "ZAI_HISTORY": "执行命令写入历史",
     "ZAI_DEBUG": "调试输出(脱敏)",
-    "ZAI_STREAM": "流式显示思考内容",
+    "ZAI_STREAM": "流式接收(整包等待 = 关)",
+    "ZAI_SHOW_THINK": "展开显示思考链",
 }
 
 DEFAULTS = {
@@ -70,11 +72,12 @@ DEFAULTS = {
     "ZAI_HISTORY": "0",
     "ZAI_DEBUG": "0",
     "ZAI_STREAM": "1",
+    "ZAI_SHOW_THINK": "0",
 }
 
 BOOLS = {
     "ZAI_INTERCEPT", "ZAI_AUTO_CONFIRM", "ZAI_STOP_ON_ERROR",
-    "ZAI_INCLUDE_CONTEXT", "ZAI_HISTORY", "ZAI_DEBUG", "ZAI_STREAM",
+    "ZAI_INCLUDE_CONTEXT", "ZAI_HISTORY", "ZAI_DEBUG", "ZAI_STREAM", "ZAI_SHOW_THINK",
 }
 CHOICES = {"ZAI_DESTRUCTIVE_POLICY": ("warn", "block", "allow")}
 INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN"}
