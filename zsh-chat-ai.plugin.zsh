@@ -300,15 +300,19 @@ _zai_field_raw() { # 取一行 JSON 里某字符串字段的“原文”(不反�
   return 0
 }
 
-_zai_think_begin() { # 首个思考文本到达: 抹掉“思考中…”占位行, 开启思考区计数
+_zai_think_begin() { # 首个思考文本到达: 抹掉占位行, 开启思考区计数
   emulate -L zsh
+  local L
   print -rn -- $'\r\e[2K'
   _zai_s_bar=0
   _zai_s_rows=0
   _zai_s_col=0
   _zai_s_w=${COLUMNS:-80}
   (( _zai_s_w > 10 )) || _zai_s_w=80
-  _zai_s_cap=$(( ${LINES:-24} - 2 ))
+  # 思考链最多显示 12 行, 防止模型思考过长刷屏
+  _zai_s_cap=12
+  L=$(( ${LINES:-24} - 2 ))
+  (( L > 0 && L < _zai_s_cap )) && _zai_s_cap=$L
   (( _zai_s_cap > 2 )) || _zai_s_cap=2
   _zai_s_clip=0
   print -rn -- "${_zai_c_dim}"   # 思考内容以灰色(弱化)呈现
@@ -325,7 +329,9 @@ _zai_think_print() { # $1 追加一段思考文本: 手动折行, 精确记录�
     if [[ $ch == $'\n' ]]; then
       print -r -- ''
       (( _zai_s_rows++ ))
-      if (( _zai_s_rows >= _zai_s_cap )); then _zai_s_clip=1; return 0; fi
+      if (( _zai_s_rows >= _zai_s_cap )); then
+        print -rn -- "${_zai_c_rst}"$'\n'"${_zai_c_dim}…(思考过长, 已截断显示)${_zai_c_rst}"
+        _zai_s_clip=1; return 0; fi
       _zai_s_col=0
       continue
     fi
@@ -334,7 +340,9 @@ _zai_think_print() { # $1 追加一段思考文本: 手动折行, 精确记录�
     if (( _zai_s_col + w > _zai_s_w )); then
       print -r -- ''
       (( _zai_s_rows++ ))
-      if (( _zai_s_rows >= _zai_s_cap )); then _zai_s_clip=1; return 0; fi
+      if (( _zai_s_rows >= _zai_s_cap )); then
+        print -rn -- "${_zai_c_rst}"$'\n'"${_zai_c_dim}…(思考过长, 已截断显示)${_zai_c_rst}"
+        _zai_s_clip=1; return 0; fi
       _zai_s_col=0
     fi
     print -rn -- "$ch"
@@ -490,8 +498,9 @@ _zai_parse() {
   content=$(print -r -- "$content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
   if [[ -z $content ]] || \
      ! print -r -- "$content" | jq -e '(.commands|type)=="array" and ([.commands[].cmd|type]|all(.=="string"))' >/dev/null 2>&1; then
-    _zai_error "模型返回的内容无法解析为约定的 JSON。原始返回(脱敏、截断):"
-    print -u2 -r -- "$(_zai_redact "$(print -r -- "$content" | head -c 600)")"
+    _zai_error "模型返回的内容无法解析为约定的 JSON(它可能在自言自语/跑题)。"
+    print -u2 -r -- "$(_zai_redact "$(print -r -- "$content" | head -c 300)")"
+    _zai_warn "提示: 可重新描述一次, 或换 deepseek-v4-pro; 若是会话上下文太乱, 在 ai chat 里 /new 清空后重试。"
     return 1
   fi
   n=$(print -r -- "$content" | jq -r '.commands|length')
