@@ -650,16 +650,25 @@ _zai_confirm_and_exec() {
     esac
   fi
 
-  # 3) 在【当前 shell】逐条执行
+  # 3) 在【当前 shell】逐条执行(输出同时捕获, 供显示与后续"继续"参考)
+  local outfile ocap
   rc=0
+  _zai_cmd_out=''
+  outfile=$(_zai_ag_tmp)
   for idx in $selected; do
     print -r -- ""
     print -r -- "${_zai_c_grn}zai>${_zai_c_rst} ${_zai_cmds[idx]}"
     _zai_inside=1
-    builtin eval "${_zai_cmds[idx]}"
+    : > "$outfile"
+    builtin eval "${_zai_cmds[idx]}" > "$outfile" 2>&1
     rc=$?
     _zai_inside=
+    _zai_cmd_out=$(<"$outfile")
     (( hist )) && print -s -- "${_zai_cmds[idx]}"
+    if [[ -n $_zai_cmd_out ]]; then
+      _zai_ag_capout "$_zai_cmd_out"        # 回显(截断)
+    fi
+    print -r -- "${_zai_c_dim}[退出码 $rc]${_zai_c_rst}"
     if (( rc )); then
       if (( stop && idx != ${selected[-1]} )); then
         print -rn -- "${_zai_c_yel}zai:${_zai_c_rst} 命令 #$idx 返回码 $rc，继续? [y/N]: "
@@ -673,6 +682,13 @@ _zai_confirm_and_exec() {
       fi
     fi
   done
+  rm -f "$outfile"
+  # 把最近一次输出存入会话(kind=output): 模型下次能看到真实结果, 而不是只看到摘要
+  if [[ -n $_zai_cmd_out ]]; then
+    ocap=$_zai_cmd_out
+    (( ${#ocap} > 2200 )) && ocap="${ocap:0:2200}...[输出过长已截断]"
+    _zai_ag_append user "[上一步命令输出(供继续参考, 不是对话内容)] $ocap" output
+  fi
   print -r -- ""
   return 0
 }
@@ -729,9 +745,9 @@ _zai_ask() {
   fi
 
   if [[ $stream == true ]]; then
-    _zai_api_stream "$payload" "$model" "$key" 1 || return 1
+    _zai_api_stream "$payload" "$model" "$key" || return 1
   else
-    _zai_api_call "$payload" "$model" "$key" 1 || return 1
+    _zai_api_call "$payload" "$model" "$key" || return 1
   fi
   code=$_zai_http_code
   body=$_zai_api_body
@@ -1313,9 +1329,9 @@ _zai_ag_call() { # $1 payload $2 model $3 key; 设 _zai_http_code/_zai_api_body;
   emulate -L zsh
   local payload=$1 model=$2 key=$3
   if (( $(_zai_var ZAI_STREAM 1) )); then
-    _zai_api_stream "$payload" "$model" "$key" 1 || return 1
+    _zai_api_stream "$payload" "$model" "$key" || return 1
   else
-    _zai_api_call "$payload" "$model" "$key" 1 || return 1
+    _zai_api_call "$payload" "$model" "$key" || return 1
   fi
   return 0
 }
@@ -1441,6 +1457,12 @@ _zai_agent_turn() {
   fi
   # 记录会话(与快速请求同一份历史)
   _zai_ag_append user "$req"
+  if (( _zai_ag_used )); then   # 工具输出也存会话, 供下一条"继续"读到真实结果
+    local oc
+    oc=${res:-}
+    (( ${#oc} > 2000 )) && oc="${oc:0:2000}...[截断]"
+    [[ -n $oc ]] && _zai_ag_append user "[工具 $toolname 输出(供继续参考, 不是对话内容)] $oc" output
+  fi
   _zai_ag_append assistant "$_zai_ag_last_text"
   rm -f "$msgsfile"
   return 0
