@@ -238,14 +238,24 @@ _zai_api_call() {
   [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
   tmp=$(mktemp 2>/dev/null) || tmp="/tmp/zai_body.$$"
   bar="${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-  (( quiet )) || print -rn -- "$bar"
-  code=$(curl -sS --max-time "$timeout" -o "$tmp" -w '%{http_code}' \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $key" \
-    --data "$payload" "$url" 2>/dev/null)
-  rc=$?
-  # 清掉“思考中”那一行(回车 + 空格覆盖 + 回车)
-  (( quiet )) || print -rn -- $'\r'"$(printf '%*s' ${#bar} '')"$'\r'
+  local -i att=1
+  while :; do
+    (( quiet )) || print -rn -- "$bar"
+    code=$(curl -sS --max-time "$timeout" -o "$tmp" -w '%{http_code}' \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer $key" \
+      --data "$payload" "$url" 2>/dev/null)
+    rc=$?
+    # 清掉“思考中”那一行(回车 + 空格覆盖 + 回车)
+    (( quiet )) || print -rn -- $'\r'"$(printf '%*s' ${#bar} '')"$'\r'
+    if (( rc == 35 && att < 3 )); then   # SSL 瞬时失败 → 自动重试
+      (( quiet )) || _zai_warn "SSL 连接失败(35), 自动重试($att/2)…"
+      sleep 2
+      att+=1
+      continue
+    fi
+    break
+  done
   if (( rc )); then
     case $rc in
       7)  em="无法连接到 $url (网络/DNS?)" ;;
@@ -392,40 +402,50 @@ _zai_api_stream() {
   codef=$(mktemp 2>/dev/null)  || codef="/tmp/zai_code.$$"
   errf=$(mktemp 2>/dev/null)   || errf="/tmp/zai_err.$$"
   rcbar=$(mktemp 2>/dev/null)  || rcbar="/tmp/zai_rc.$$"
-  _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
-  _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0
-  _zai_s_rows=0; _zai_s_col=0; _zai_s_bar=1
-  (( $(_zai_var ZAI_SHOW_THINK 0) )) && _zai_s_show=1
-  if (( _zai_s_show )); then
-    print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-  else
-    print -rn -- "${_zai_c_dim}zai: 思考中 ($model)… (思考链折叠, ZAI_SHOW_THINK=1 可展开)${_zai_c_rst}"
-  fi
-  (
-    # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
-    while IFS= read -r line; do
-      line=${line%$'\r'}          # 兼容 CRLF 响应的行尾回车
-      _zai_sse_line "$line"
-    done < <(curl -sS --max-time "$timeout" \
-        -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $key" \
-        --data "$payload" \
-        -w $'\n%{http_code}\n' "$url" 2>/dev/null; print -r -- "EXIT:$?")
-    # 流结束仍未出结果: 显示过思考(超时/中断) → 保留思考便于查看, 不整块清除; 只复位颜色
-    if (( ! _zai_s_res_done )); then
-      if (( _zai_s_bar )); then
-        print -rn -- $'\r\e[2K'"${_zai_c_rst}"   # 全程只显示过占位行 → 抹掉
-      else
-        print -rn -- "${_zai_c_rst}"
-        print -r -- ""                            # 思考被中断: 留空一行再输出错误
-      fi
+  local -i att=1
+  while :; do
+    _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
+    _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0
+    _zai_s_rows=0; _zai_s_col=0; _zai_s_bar=1
+    (( $(_zai_var ZAI_SHOW_THINK 0) )) && _zai_s_show=1
+    if (( _zai_s_show )); then
+      print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+    else
+      print -rn -- "${_zai_c_dim}zai: 思考中 ($model)… (思考链折叠, ZAI_SHOW_THINK=1 可展开)${_zai_c_rst}"
     fi
-    print -r -- "$_zai_s_raw"  > "$rawf"
-    print -r -- "$_zai_s_code" > "$codef"
-    print -r -- "$_zai_s_err"  > "$errf"
-    print -r -- "$_zai_s_exit" > "$rcbar"
-  )
-  rc=$(( $(<"$rcbar") ))
+    (
+      # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
+      while IFS= read -r line; do
+        line=${line%$'\r'}          # 兼容 CRLF 响应的行尾回车
+        _zai_sse_line "$line"
+      done < <(curl -sS --max-time "$timeout" \
+          -H 'Content-Type: application/json' \
+          -H "Authorization: Bearer $key" \
+          --data "$payload" \
+          -w $'\n%{http_code}\n' "$url" 2>/dev/null; print -r -- "EXIT:$?")
+      # 流结束仍未出结果: 显示过思考(超时/中断) → 保留思考便于查看, 不整块清除; 只复位颜色
+      if (( ! _zai_s_res_done )); then
+        if (( _zai_s_bar )); then
+          print -rn -- $'\r\e[2K'"${_zai_c_rst}"   # 全程只显示过占位行 → 抹掉
+        else
+          print -rn -- "${_zai_c_rst}"
+          print -r -- ""                            # 思考被中断: 留空一行再输出错误
+        fi
+      fi
+      print -r -- "$_zai_s_raw"  > "$rawf"
+      print -r -- "$_zai_s_code" > "$codef"
+      print -r -- "$_zai_s_err"  > "$errf"
+      print -r -- "$_zai_s_exit" > "$rcbar"
+    )
+    rc=$(( $(<"$rcbar") ))
+    if (( rc == 35 && att < 3 )); then   # SSL 瞬时失败 → 自动重试
+      _zai_warn "SSL 连接失败(35), 自动重试($att/2)…"
+      sleep 2
+      att+=1
+      continue
+    fi
+    break
+  done
   _zai_http_code=$(<"$codef")
   raw=$(<"$rawf")
   bodyerr=$(<"$errf")
@@ -561,6 +581,19 @@ _zai_parse_selection() { # $1=输入串, $2=上限; 输出合法的去重编号(
   print -r -- "${(F)u}"
 }
 
+# 生成“执行摘要”(explanation + 各命令标签), 便于之后说“继续”时模型了解做过什么
+_zai_plan_note() {
+  emulate -L zsh
+  local note=$_zai_explanation i
+  local -a parts
+  note=${note:-给 ${_zai_cmd_count} 条命令}
+  parts=()
+  for (( i=1; i<=_zai_cmd_count; i++ )); do
+    parts+=("#$i:${_zai_descs[i]}")
+  done
+  print -r -- "$note [${_zai_cmd_count} 条: ${(j:、 :)parts}]"
+}
+
 # ---------------------------------------------------------------- 确认与执行
 _zai_confirm_and_exec() {
   emulate -L zsh
@@ -622,12 +655,16 @@ _zai_confirm_and_exec() {
     rc=$?
     _zai_inside=
     (( hist )) && print -s -- "${_zai_cmds[idx]}"
-    if (( rc && stop )); then
-      print -rn -- "${_zai_c_yel}zai:${_zai_c_rst} 命令 #$idx 返回码 $rc，继续? [y/N]: "
-      read -r cont
-      if [[ $cont != [yY] ]]; then
-        _zai_warn "已中断，剩余命令未执行。"
-        break
+    if (( rc )); then
+      if (( stop && idx != ${selected[-1]} )); then
+        print -rn -- "${_zai_c_yel}zai:${_zai_c_rst} 命令 #$idx 返回码 $rc，继续? [y/N]: "
+        read -r cont
+        if [[ $cont != [yY] ]]; then
+          _zai_warn "已中断，剩余命令未执行。"
+          break
+        fi
+      else
+        _zai_warn "命令 #$idx 返回码 $rc(已是最后一条, 流程结束)。"
       fi
     fi
   done
@@ -642,6 +679,15 @@ _zai_ask() {
   local req="$*"
   req=${req//$'\n'/ }
   if [[ -z ${req//[[:space:]]/} ]]; then _zai_error "请求为空。用法: ai <自然语言>"; return 1; fi
+
+  # “继续/接着做…” → 走 agent 多步(有工具+会话+记忆), 而不是当成一次性请求
+  local lreq
+  lreq=${req//[[:space:]]/}
+  case $lreq in
+    ''|继续*|接着*|接着做*|再来*|continue*|goon*|keepgoing*)
+      _zai_agent_turn "$req"
+      return $? ;;
+  esac
 
   local model key lang ctx sys user temp payload code body stream hist rc
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
@@ -730,17 +776,17 @@ _zai_ask() {
   if (( $(_zai_var ZAI_DRY_RUN 0) )); then
     _zai_show_plan
     _zai_warn "[DRY-RUN] 仅预览，不执行任何命令。"
-    note=$_zai_explanation
-    [[ -n $note ]] || note="(dry-run 预览 ${_zai_cmd_count} 条命令)"
-    _zai_ag_append assistant "$note"
+    _zai_ag_append assistant "$(_zai_plan_note) [dry-run]"
     return 0
   fi
   _zai_confirm_and_exec
   rc=$?
   if (( rc == 0 )); then
-    note=$_zai_explanation
-    [[ -n $note ]] || note="已执行 ${_zai_cmd_count} 条命令"
-    _zai_ag_append assistant "$note"
+    _zai_ag_append assistant "$(_zai_plan_note) [已执行]"
+  elif (( rc == 2 )); then
+    _zai_ag_append assistant "$(_zai_plan_note) [用户取消, 未执行]"
+  else
+    _zai_ag_append assistant "$(_zai_plan_note) [执行出错]"
   fi
   return $rc
 }
