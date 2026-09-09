@@ -359,7 +359,7 @@ _zai_confirm_and_exec() {
     case $ans in
       ''|n|N|q|Q) print -r -- ''; return 2 ;;
       y|Y) selected=($all) ;;
-      *)  selected=( ${(@f)"$(_zai_parse_selection "$ans")"} )
+      *)  selected=( ${(@f)"$(_zai_parse_selection "$ans" "$_zai_cmd_count")"} )
           if (( ${#selected} == 0 )); then
             print -r -- ''
             _zai_error "无效选择: $ans"
