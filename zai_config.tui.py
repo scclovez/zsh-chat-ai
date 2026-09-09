@@ -17,6 +17,7 @@ zsh-chat-ai 配置 TUI (curses)
 import curses
 import json
 import os
+import shlex
 import sys
 
 # 字段顺序即显示/保存顺序
@@ -133,6 +134,238 @@ def write_config(path, vals, order):
         return False
 
 
+# ================================================================ 人设管理
+# 人设 = 一段"角色/风格/行为"文本, 存于 <cfg目录>/personas/<名字>.md,
+# 启动与 ai -config 后会被 zsh 端读入并注入系统提示(优先级高于默认行为)。
+# 内置人设缺省自动落盘; 用户可新建/编辑/删除(内置除外)。选中的人设名写入配置键 ZAI_PERSONA。
+BUILTIN_PERSONAS = {
+    "cmd-expert": "你是\"命令专家\": 目标导向、直奔可执行方案。回答干脆、少客套；需要动手时优先给出能在当前 shell 直接执行的命令或一步到位的做法，并提示关键副作用与前提。除非用户明显在闲聊，默认倾向给出可执行方案而非空泛解释。",
+    "chatty": "你是随和的朋友型助手 zai：语气轻松自然、适度使用 emoji，愿意闲聊也愿意干活；闲聊时不要硬塞命令，需要动手时才给命令。",
+    "concise": "回答极简、克制：能一句话说清就不说两句；给命令时只列必要步骤，不写多余客套与解释；必要时用简短要点。",
+    "en": "Reply in English by default. Be concise and practical: chat when the user chats, and produce ready-to-run shell commands when the user asks you to do something. Keep the same safety rules as the base system prompt.",
+}
+
+
+def persona_dir(cfg):
+    return os.path.join(os.path.dirname(os.path.abspath(cfg)), "personas")
+
+
+def read_config_key(path, key):
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                if ln.startswith(key + "="):
+                    return ln[len(key) + 1:].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def set_config_key(path, key, value):
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+        os.makedirs(d, exist_ok=True)
+        out = []
+        hit = False
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    if ln.startswith(key + "="):
+                        hit = True
+                        if value:
+                            out.append("%s=%s\n" % (key, value))
+                        continue
+                    out.append(ln)
+        if not hit and value:
+            out.append("%s=%s\n" % (key, value))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(out)
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_personas(pdir):
+    try:
+        os.makedirs(pdir, exist_ok=True)
+        for name, text in BUILTIN_PERSONAS.items():
+            p = os.path.join(pdir, name + ".md")
+            if not os.path.isfile(p):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(text + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def list_personas(pdir):
+    try:
+        return sorted(f[:-3] for f in os.listdir(pdir) if f.endswith(".md"))
+    except OSError:
+        return []
+
+
+def run_editor(path):
+    editor = os.environ.get("ZAI_EDITOR") or os.environ.get("EDITOR") or "vi"
+    try:
+        curses.def_prog_mode()
+        curses.endwin()
+        os.system("%s %s" % (editor, shlex.quote(path)))
+        curses.reset_prog_mode()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def prompt_line(stdscr, prompt):
+    h, w = stdscr.getmaxyx()
+    buf = ""
+    while True:
+        stdscr.move(h - 1, 0)
+        stdscr.clrtoeol()
+        shown = prompt + buf + "_"
+        try:
+            stdscr.addnstr(h - 1, 0, shown[: max(0, w - 1)], w - 1, curses.A_REVERSE)
+            stdscr.move(h - 1, min(w - 1, len(prompt) + len(buf)))
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        stdscr.refresh()
+        c = stdscr.getch()
+        if c in (10, 13, curses.KEY_ENTER):
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            return buf.strip()
+        if c in (27,):
+            return None
+        if c in (8, 127, curses.KEY_BACKSPACE):
+            buf = buf[:-1]
+        elif 32 <= c <= 126:
+            if len(buf) < 60:
+                buf += chr(c)
+
+
+def persona_page(stdscr):
+    """人设管理页。返回 True 表示有改动(回到主界面后按 s 一起保存重载)。"""
+    cfg = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else ""
+    if not cfg:
+        return False
+    pdir = persona_dir(cfg)
+    ensure_personas(pdir)
+    curp = read_config_key(cfg, "ZAI_PERSONA")
+    names = list_personas(pdir)
+    cur = names.index(curp) if curp in names else 0
+    changed = False
+    msg = ""
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        try:
+            title = "人设管理    j/k 移动 · Enter 选用 · n 新建 · e 编辑 · d 删除(内置除外) · q 返回"
+            stdscr.addnstr(0, 0, title, max(0, w))
+            maxr = h - 4
+            if names:
+                if cur < 0:
+                    cur = 0
+                if cur >= len(names):
+                    cur = len(names) - 1
+                off = min(max(0, cur - maxr // 2), max(0, len(names) - maxr)) if maxr > 0 else 0
+                y = 2
+                for i in range(off, min(len(names), off + maxr)):
+                    nm = names[i]
+                    mark = "> " if i == cur else "  "
+                    tag = "  [当前]" if nm == curp else ""
+                    builtin = "  (内置)" if nm in BUILTIN_PERSONAS else ""
+                    attr = curses.A_REVERSE if i == cur else curses.A_NORMAL
+                    stdscr.addnstr(y, 0, "%s%-18s%s%s%s" % (mark, nm, builtin, tag, ""), w, attr)
+                    y += 1
+            cfgline = "config: " + cfg + "   personas: " + pdir
+            stdscr.addnstr(h - 3, 0, cfgline, w)
+            if msg:
+                stdscr.addnstr(h - 2, 0, msg, w)
+            else:
+                stdscr.addnstr(h - 2, 0, "新建/编辑会打开 $ZAI_EDITOR 或 $EDITOR(默认 vi)", w)
+        except curses.error:
+            pass
+        stdscr.refresh()
+        c = stdscr.getch()
+        if not names and c not in (ord("n"), ord("N"), ord("q"), ord("Q"), 27, curses.KEY_RESIZE):
+            msg = "还没有人设, 按 n 新建。"
+            continue
+        if c == curses.KEY_RESIZE:
+            continue
+        if c in (curses.KEY_UP, ord("k"), ord("K")):
+            cur = (cur - 1) % len(names) if names else 0
+        elif c in (curses.KEY_DOWN, ord("j"), ord("J")):
+            cur = (cur + 1) % len(names) if names else 0
+        elif c in (10, 13, curses.KEY_ENTER):
+            if names:
+                curp = names[cur]
+                if set_config_key(cfg, "ZAI_PERSONA", curp):
+                    changed = True
+                    msg = "已选用: " + curp + " (回主界面按 s 保存并生效)"
+        elif c in (ord("n"), ord("N")):
+            nm = prompt_line(stdscr, "新名字(字母/数字/-/_): ")
+            if nm is None:
+                continue
+            if nm in names:
+                msg = "已存在同名, 换个名字。"
+                continue
+            if not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in nm):
+                msg = "名字只能含字母/数字/-/_。"
+                continue
+            p = os.path.join(pdir, nm + ".md")
+            try:
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("%s 的人设(编辑此文件, 保存即生效):\n" % nm)
+            except OSError as e:  # noqa: BLE001
+                msg = "创建失败: %s" % e
+                continue
+            names = list_personas(pdir)
+            cur = names.index(nm)
+            curp = nm
+            set_config_key(cfg, "ZAI_PERSONA", curp)
+            changed = True
+            run_editor(p)
+            msg = "已创建并选用: %s (用 e 可再编辑)" % nm
+        elif c in (ord("e"), ord("E")):
+            if names:
+                run_editor(os.path.join(pdir, names[cur] + ".md"))
+                msg = "已编辑: %s" % names[cur]
+        elif c in (ord("d"), ord("D")):
+            if names:
+                nm = names[cur]
+                if nm in BUILTIN_PERSONAS:
+                    msg = "内置人设不可删除。"
+                    continue
+                try:
+                    os.remove(os.path.join(pdir, nm + ".md"))
+                except OSError as e:  # noqa: BLE001
+                    msg = "删除失败: %s" % e
+                    continue
+                if curp == nm:
+                    curp = ""
+                    set_config_key(cfg, "ZAI_PERSONA", "")
+                changed = True
+                names = list_personas(pdir)
+                if cur >= len(names):
+                    cur = max(0, len(names) - 1)
+                msg = "已删除: %s" % nm
+        elif c in (ord("q"), ord("Q"), 27):
+            break
+    return changed
+
+
 def main(stdscr):
     init = {}
     if len(sys.argv) > 2:
@@ -194,7 +427,7 @@ def main(stdscr):
             continue
 
         stdscr.erase()
-        title = "zsh-chat-ai 配置   操作: ↑/↓ 或 j/k 移动 · Enter 编辑/切换 · Esc 取消编辑 · s 保存 · q 退出"
+        title = "zsh-chat-ai 配置   操作: ↑/↓ 或 j/k 移动 · Enter 编辑/切换 · Esc 取消编辑 · s 保存 · p 人设 · q 退出"
         try:
             stdscr.addnstr(0, 0, title, w)
             y = 2
@@ -278,6 +511,10 @@ def main(stdscr):
             elif c in (ord("s"), ord("S")):
                 save = True
                 break
+            elif c in (ord("p"), ord("P")):
+                if persona_page(stdscr):   # 人设页有改动 → 回到保存流程统一落盘
+                    save = True
+                    break
             elif c in (ord("q"), ord("Q"), 27):
                 break
 
