@@ -268,6 +268,7 @@ _zai_think_begin() { # 首个思考文本到达: 抹掉“思考中…”占位�
   _zai_s_cap=$(( ${LINES:-24} - 2 ))
   (( _zai_s_cap > 2 )) || _zai_s_cap=2
   _zai_s_clip=0
+  print -rn -- "${_zai_c_dim}"   # 思考内容以灰色(弱化)呈现
   return 0
 }
 
@@ -299,8 +300,9 @@ _zai_think_print() { # $1 追加一段思考文本: 手动折行, 精确记录�
   return 0
 }
 
-_zai_think_close() { # 出结果/流结束: 光标回到思考区起点并向下清除, 思考内容即被“关掉”
+_zai_think_close() { # 出结果/流结束: 复位灰色, 光标回到思考区起点并向下清除
   emulate -L zsh
+  print -rn -- "${_zai_c_rst}"
   if (( _zai_s_rows > 0 )); then
     print -rn -- $'\r' $'\e['"$_zai_s_rows"'A' $'\e[J'
   elif (( _zai_s_col > 0 || _zai_s_clip )); then
@@ -359,14 +361,15 @@ _zai_api_stream() {
   (
     # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
     while IFS= read -r line; do
+      line=${line%$'\r'}          # 兼容 CRLF 响应的行尾回车
       _zai_sse_line "$line"
     done < <(curl -sS --max-time "$timeout" \
         -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $key" \
         --data "$payload" \
-        -w $'\n%{http_code}' "$url" 2>/dev/null; print -r -- "EXIT:$?")
+        -w $'\n%{http_code}\n' "$url" 2>/dev/null; print -r -- "EXIT:$?")
     (( _zai_s_res_done )) || _zai_think_close   # 流结束仍未出结果(纯思考/异常): 同样收起
-    (( _zai_s_bar )) && print -rn -- $'\r\e[2K' # 全程没显示思考 → 抹掉占位行
+    (( _zai_s_bar )) && print -rn -- $'\r\e[2K'"${_zai_c_rst}" # 全程没显示思考 → 抹掉占位行
     print -r -- "$_zai_s_raw"  > "$rawf"
     print -r -- "$_zai_s_code" > "$codef"
     print -r -- "$_zai_s_err"  > "$errf"
