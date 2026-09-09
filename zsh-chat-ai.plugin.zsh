@@ -173,6 +173,7 @@ EOF
     print -r -- "【本次为强制命令模式】用户想执行命令: 请务必输出 B(mode=cmd) 并给出可执行命令，不要输出 chat。"
   fi
   _zai_mem_block
+  _zai_outcome_block
   local persona
   persona=$(_zai_persona_text)
   if [[ -n $persona ]]; then
@@ -774,20 +775,28 @@ _zai_ask() {
   fi
 
   _zai_parse "$body" || return 1
+  local note
   if (( $(_zai_var ZAI_DRY_RUN 0) )); then
     _zai_show_plan
     _zai_warn "[DRY-RUN] 仅预览，不执行任何命令。"
-    _zai_ag_append assistant "$(_zai_plan_note) [dry-run]"
+    note="$(_zai_plan_note) [dry-run]"
+    _zai_ag_append assistant "$note" note
+    _zai_outcome=$note
     return 0
   fi
   _zai_confirm_and_exec
   rc=$?
   if (( rc == 0 )); then
-    _zai_ag_append assistant "$(_zai_plan_note) [已执行]"
+    note="$(_zai_plan_note) [已执行]"
+    _zai_ag_append assistant "$note" note
+    _zai_outcome=$note
   elif (( rc == 2 )); then
-    _zai_ag_append assistant "$(_zai_plan_note) [用户取消, 未执行]"
+    note="$(_zai_plan_note) [用户取消, 未执行]"
+    _zai_ag_append assistant "$note" note
   else
-    _zai_ag_append assistant "$(_zai_plan_note) [执行出错]"
+    note="$(_zai_plan_note) [执行出错 rc=$rc]"
+    _zai_ag_append assistant "$note" note
+    _zai_outcome=$note
   fi
   return $rc
 }
@@ -886,6 +895,15 @@ _zai_mem_block() { # 注入给模型的记忆块(仅数据/参考, 非指令)
     fi
   fi
 }
+# 最近一次执行结果(仅当前 shell 会话内, 随提示注入; 不进对话历史, 避免模型复读)
+_zai_outcome_block() {
+  emulate -L zsh
+  [[ -n ${_zai_outcome:-} ]] || return 0
+  print -r -- ""
+  print -r -- "最近一次执行结果(仅供'继续'时参考, 是状态不是对话内容, 不要复读它):"
+  print -r -- "$_zai_outcome"
+}
+
 _zai_mem_show() { # repl /mem
   emulate -L zsh
   (( $(_zai_var ZAI_MEMORY 1) )) || { print -r -- "记忆已关闭(ZAI_MEMORY=0)"; return; }
@@ -953,15 +971,16 @@ _zai_ag_ensure_file() {
   d=$(_zai_ag_dir); mkdir -p "$d" 2>/dev/null
   f=$(_zai_ag_file); [[ -f $f ]] || : > "$f"
 }
-_zai_ag_append() { # $1=role(user/assistant) $2=text
+_zai_ag_append() { # $1=role(user/assistant) $2=text $3=kind(默认对话; note=执行摘要,不进对话历史)
   emulate -L zsh
-  local role=$1 text=$2 file ts max n
+  local role=$1 text=$2 kind=${3:-} file ts max n
   (( $(_zai_var ZAI_SESSION 1) )) || return 0
   [[ -n $text ]] || return 0
   _zai_ag_ensure_file
   file=$(_zai_ag_file)
   ts=$(date +%s 2>/dev/null || print 0)
-  jq -nc --arg ts "$ts" --arg role "$role" --arg text "$text" '{ts:$ts,role:$role,text:$text}' >> "$file"
+  jq -nc --arg ts "$ts" --arg role "$role" --arg text "$text" --arg kind "$kind" \
+    '{ts:$ts,role:$role,text:$text,kind:$kind}' >> "$file"
   max=$(_zai_var ZAI_SESSION_TURNS 30)
   [[ $max =~ ^[0-9]+$ ]] || max=30
   n=$(wc -l < "$file" 2>/dev/null)
@@ -987,12 +1006,12 @@ _zai_ag_list() {
     print -r -- "${_zai_c_dim}[$role]${_zai_c_rst} $text"
   done < "$f"
 }
-_zai_ag_hist_lines() { # 把会话历史转成 messages 行(role/content) 给模型
+_zai_ag_hist_lines() { # 把会话历史转成 messages 行(role/content) 给模型; note(执行摘要)不进对话
   emulate -L zsh
   local f
   _zai_ag_ensure_file
   f=$(_zai_ag_file)
-  jq -c 'select((.text // "") != "") | {role:(if .role == "assistant" then "assistant" else "user" end), content:.text}' "$f" 2>/dev/null
+  jq -c 'select((( .text // "" ) != "") and ((.kind // "") != "note")) | {role:(if .role == "assistant" then "assistant" else "user" end), content:.text}' "$f" 2>/dev/null
 }
 
 # ---------------- 会话超窗自动摘要 (把挤掉的老轮次压成要点进项目记忆)
@@ -1089,6 +1108,7 @@ _zai_prompt_agent() { # 给 agent 会话的 system 提示(含工具契约)
 7. 回复语言: $lang
 EOF
   _zai_mem_block
+  _zai_outcome_block
   local persona
   persona=$(_zai_persona_text)
   if [[ -n $persona ]]; then
