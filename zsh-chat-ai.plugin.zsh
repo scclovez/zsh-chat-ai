@@ -390,9 +390,9 @@ _zai_sse_line() { # 处理一行 SSE / 尾部哨兵; 状态存全局 _zai_s_* (�
 }
 
 # 流式调用主流程: 成功后设 _zai_http_code / _zai_api_body(重组为旧格式便于 _zai_parse 复用)
-_zai_api_stream() {
+_zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(Claude 式静默等待)
   emulate -L zsh
-  local payload=$1 model=$2 key=$3
+  local payload=$1 model=$2 key=$3 quiet=${4:-0}
   local url timeout rawf codef errf rcbar bodyerr em
   local raw ct line
   local -i rc
@@ -407,12 +407,16 @@ _zai_api_stream() {
   while :; do
     _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
     _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0
-    _zai_s_rows=0; _zai_s_col=0; _zai_s_bar=1
+    _zai_s_rows=0; _zai_s_col=0
+    _zai_s_bar=0
+    (( quiet )) && _zai_s_bar=0 || _zai_s_bar=1
     (( $(_zai_var ZAI_SHOW_THINK 0) )) && _zai_s_show=1
-    if (( _zai_s_show )); then
-      print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-    else
-      print -rn -- "${_zai_c_dim}zai: 思考中 ($model)… (思考链折叠, ZAI_SHOW_THINK=1 可展开)${_zai_c_rst}"
+    if (( ! quiet )); then
+      if (( _zai_s_show )); then
+        print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+      else
+        print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
+      fi
     fi
     (
       # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
@@ -725,9 +729,9 @@ _zai_ask() {
   fi
 
   if [[ $stream == true ]]; then
-    _zai_api_stream "$payload" "$model" "$key" || return 1
+    _zai_api_stream "$payload" "$model" "$key" 1 || return 1
   else
-    _zai_api_call "$payload" "$model" "$key" || return 1
+    _zai_api_call "$payload" "$model" "$key" 1 || return 1
   fi
   code=$_zai_http_code
   body=$_zai_api_body
@@ -1309,9 +1313,9 @@ _zai_ag_call() { # $1 payload $2 model $3 key; 设 _zai_http_code/_zai_api_body;
   emulate -L zsh
   local payload=$1 model=$2 key=$3
   if (( $(_zai_var ZAI_STREAM 1) )); then
-    _zai_api_stream "$payload" "$model" "$key" || return 1
+    _zai_api_stream "$payload" "$model" "$key" 1 || return 1
   else
-    _zai_api_call "$payload" "$model" "$key" || return 1
+    _zai_api_call "$payload" "$model" "$key" 1 || return 1
   fi
   return 0
 }
