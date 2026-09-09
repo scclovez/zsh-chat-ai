@@ -1639,9 +1639,9 @@ _zai_help() {
   print -r -- "zsh-chat-ai —— 在终端里用自然语言调用 AI: 聊天、生成命令、当 agent 改代码"
   print -r -- ""
   print -r -- "用法:"
-  print -r -- "  ${ZAI_CMD:-ai} <一句话>            自动分流: 闲聊回文本 / 要动手则给命令(确认后执行)"
-  print -r -- "  ${ZAI_CMD:-ai} run <一句话>        强制命令模式"
-  print -r -- "  ${ZAI_CMD:-ai} chat               进入 agent 会话(多轮, 可读/搜/执行/改文件)"
+  print -r -- "  ${ZAI_CMD:-ai} <一句话>            直接进入 agent 会话(与 ai chat 同一上下文/记忆)"
+  print -r -- "  ${ZAI_CMD:-ai} run <一句话>        按'命令计划'一次处理(不走多轮工具循环)"
+  print -r -- "  ${ZAI_CMD:-ai} chat               会话界面(斜杠: /new /persona /remember /m /help /quit)"
   print -r -- "  ${ZAI_CMD:-ai} chat <一句话>       单次 agent 请求(不进会话界面)"
   print -r -- "  ${ZAI_CMD:-ai} -config            打开 TUI 配置 API/模型/行为开关"
   print -r -- "  直接输入一句不是命令的话回车      拦截未知命令 → 自动走 AI"
@@ -1669,13 +1669,15 @@ _zai_cmd_entry() {
        return $r ;;
   esac
   if (( $# == 0 )); then
-    print -r -- "用法: ${ZAI_CMD:-ai} <自然语言请求>    例如: ${ZAI_CMD:-ai} 把时区改成上海"
-    print -r -- "      ${ZAI_CMD:-ai} chat             进入 agent 会话"
-    print -r -- "      ${ZAI_CMD:-ai} -config         打开 TUI 配置"
+    print -r -- "用法: ${ZAI_CMD:-ai} <一句话>       直接进入 agent 会话(和 ai chat 同一上下文)"
+    print -r -- "      ${ZAI_CMD:-ai} chat           进入会话界面(斜杠命令 /new /persona /remember …)"
+    print -r -- "      ${ZAI_CMD:-ai} run <话>       强制按'命令计划'处理(不走工具循环)"
+    print -r -- "      ${ZAI_CMD:-ai} -config        打开 TUI 配置"
     print -r -- "也可以直接输入一句不是命令的话回车触发(可用 ZAI_INTERCEPT=0 关闭该拦截)。"
     return 1
   fi
-  _zai_ask "$*"
+  # 普通输入 = 与 ai chat 完全相同的 agent 会话(同目录上下文/记忆/工具)
+  _zai_agent_turn "$*"
 }
 
 # ---------------------------------------------------------------- 拦截未知命令
@@ -1700,13 +1702,9 @@ _zai_intercept() {
   if [[ ${#first} -lt $minlen ]]; then
     _zai_not_found "$first"; return 127
   fi
-  _zai_ask "$*"
-  local rc=$?
-  if (( rc == 2 )); then
-    _zai_not_found "$first"
-    return 127
-  fi
-  return $rc
+  # 与 ai / ai chat 完全同一会话: 直接走 agent
+  _zai_agent_turn "$*"
+  return $?
 }
 
 # ---------------------------------------------------------------- 注册
