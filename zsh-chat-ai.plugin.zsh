@@ -54,7 +54,7 @@ _zai_config_path() {
 _zai_allowed_cfg=(ZAI_API_URL ZAI_API_KEY ZAI_MODEL ZAI_TEMPERATURE ZAI_TIMEOUT \
   ZAI_INTERCEPT ZAI_MIN_INTERCEPT_LEN ZAI_DESTRUCTIVE_POLICY ZAI_AUTO_CONFIRM \
   ZAI_STOP_ON_ERROR ZAI_DEBUG ZAI_INCLUDE_CONTEXT ZAI_HISTORY ZAI_LANG ZAI_STREAM \
-  ZAI_PERSONA ZAI_MEMORY)
+  ZAI_PERSONA ZAI_MEMORY ZAI_SUMMARIZE)
 
 # 优先级: 环境变量/已在 shell 设好的参数 > 配置文件 > 内置默认。
 # 用 _zai_from_cfg 记住"来自文件"的键，使 ai -config 保存后能即时重载。
@@ -228,23 +228,24 @@ _zai_api_err() { # 从错误 body 提取 message
 }
 
 # 执行 curl。成功时把 http 码与响应体分别存到全局 _zai_http_code / _zai_api_body。
+# $4=quiet: 非空则不打印/清除“思考中”占位行(后台摘要等场景)
 _zai_api_call() {
   emulate -L zsh
-  local payload=$1 model=$2 key=$3
+  local payload=$1 model=$2 key=$3 quiet=${4:-0}
   local url timeout tmp code rc bar em
   url=$(_zai_var ZAI_API_URL https://api.deepseek.com/chat/completions)
   timeout=$(_zai_var ZAI_TIMEOUT 60)
   [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
   tmp=$(mktemp 2>/dev/null) || tmp="/tmp/zai_body.$$"
   bar="${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-  print -rn -- "$bar"
+  (( quiet )) || print -rn -- "$bar"
   code=$(curl -sS --max-time "$timeout" -o "$tmp" -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $key" \
     --data "$payload" "$url" 2>/dev/null)
   rc=$?
   # 清掉“思考中”那一行(回车 + 空格覆盖 + 回车)
-  print -rn -- $'\r'"$(printf '%*s' ${#bar} '')"$'\r'
+  (( quiet )) || print -rn -- $'\r'"$(printf '%*s' ${#bar} '')"$'\r'
   if (( rc )); then
     case $rc in
       7)  em="无法连接到 $url (网络/DNS?)" ;;
@@ -639,6 +640,7 @@ _zai_ask() {
     _zai_ag_ensure_file
     hist=$(_zai_ag_file)
   fi
+  _zai_hist_maybe_summarize   # 超窗积压够量时先压成要点进项目记忆
 
   ctx=''
   if (( $(_zai_var ZAI_INCLUDE_CONTEXT 1) )); then ctx=$(_zai_sys_context); fi
@@ -898,7 +900,14 @@ _zai_ag_append() { # $1=role(user/assistant) $2=text
   max=$(_zai_var ZAI_SESSION_TURNS 30)
   [[ $max =~ ^[0-9]+$ ]] || max=30
   n=$(wc -l < "$file" 2>/dev/null)
-  if (( n > max )); then tail -n "$max" "$file" > "$file.t" && mv "$file.t" "$file"; fi
+  if (( n > max )); then
+    # 超窗: 把被挤掉的老轮次先存进"待摘要"队列, 攒够再交给摘要器(省 token)
+    if (( $(_zai_var ZAI_SUMMARIZE 1) )); then
+      head -n $(( n - max )) "$file" >> "$(_zai_hist_pending_file)" 2>/dev/null
+      _zai_hist_pending_cap
+    fi
+    tail -n "$max" "$file" > "$file.t" && mv "$file.t" "$file"
+  fi
 }
 _zai_ag_new() { emulate -L zsh; local f; f=$(_zai_ag_file); rm -f "$f" 2>/dev/null; }
 _zai_ag_list() {
@@ -919,6 +928,52 @@ _zai_ag_hist_lines() { # 把会话历史转成 messages 行(role/content) 给模
   _zai_ag_ensure_file
   f=$(_zai_ag_file)
   jq -c 'select((.text // "") != "") | {role:(if .role == "assistant" then "assistant" else "user" end), content:.text}' "$f" 2>/dev/null
+}
+
+# ---------------- 会话超窗自动摘要 (把挤掉的老轮次压成要点进项目记忆)
+_zai_hist_pending_file() { emulate -L zsh; print -r -- "$(_zai_ag_dir)/summary.pending"; }
+_zai_hist_pending_cap() {
+  emulate -L zsh
+  local f n
+  f=$(_zai_hist_pending_file)
+  [[ -f $f ]] || return 0
+  n=$(wc -l < "$f" 2>/dev/null)
+  if (( n > 500 )); then tail -n 500 "$f" > "$f.t" && mv "$f.t" "$f"; fi
+}
+_zai_summarize_text() { # 调一次 API 把文本压成要点; 静默, 失败输出空
+  emulate -L zsh
+  local raw=$1 model key payload sys
+  model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
+  key=$(_zai_var ZAI_API_KEY "")
+  [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
+  [[ -n $key && -n $raw ]] || return 0
+  sys="你是会话摘要器。把下面的对话压缩成要点(5-8 条), 只收录: 关键决定、事实、用户偏好、待办事项、任务进度/断点。每条单独一行、以 \"- \" 开头、中文、简洁。只输出要点文本, 不要寒暄或解释。"
+  payload=$(jq -nc --arg m "$model" --arg s "$sys" --arg u "$raw" \
+    '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}],temperature:0.3,stream:false}')
+  _zai_api_call "$payload" "$model" "$key" 1 || return 0
+  [[ $_zai_http_code == 200 ]] || return 0
+  local out
+  out=$(print -r -- "$_zai_api_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+  out=$(print -r -- "$out" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
+  print -r -- "$out"
+}
+_zai_hist_maybe_summarize() { # 在每次请求前调用; pending 攒够 8 行才压一次
+  emulate -L zsh
+  (( $(_zai_var ZAI_SUMMARIZE 1) && $(_zai_var ZAI_MEMORY 1) )) || return 0
+  local f n raw txt ts
+  f=$(_zai_hist_pending_file)
+  [[ -r $f ]] || return 0
+  n=$(wc -l < "$f" 2>/dev/null)
+  (( n >= 8 )) || return 0
+  raw=$(jq -r '"[" + (.role // "?") + "] " + (.text // "")' "$f" 2>/dev/null | head -c 6000)
+  rm -f "$f"
+  [[ -n $raw ]] || return 0
+  txt=$(_zai_summarize_text "$raw")
+  if [[ -n $txt ]]; then
+    ts=$(date '+%F %T' 2>/dev/null)
+    _zai_mem_append p "[会话摘要 ${ts}] $txt"
+    _zai_log "旧对话已自动摘要, 记入项目记忆(节省上下文)"
+  fi
 }
 
 # 由 messages json 行文件构造 payload(agent 循环用)
@@ -1180,7 +1235,8 @@ _zai_agent_turn() {
   emulate -L zsh
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
   local content text tjson done toolname res
-  local -i step max ok i
+  local plan nplan pl
+  local -i step max
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
   key=$(_zai_var ZAI_API_KEY "")
   [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
@@ -1192,6 +1248,8 @@ _zai_agent_turn() {
   [[ $temp =~ ^-?[0-9]+([.][0-9]+)?$ ]] || temp=0.2
   stream=true
   (( $(_zai_var ZAI_STREAM 1) )) || stream=false
+  _zai_hist_maybe_summarize   # 超窗积压够量时先压成要点进项目记忆
+  _zai_ag_plan_ok=0
   ctx=''
   if (( $(_zai_var ZAI_INCLUDE_CONTEXT 1) )); then ctx=$(_zai_sys_context); fi
   lang=$(_zai_lang)
@@ -1207,6 +1265,7 @@ _zai_agent_turn() {
   (( max > 0 )) || max=6
   _zai_ag_last_text=''
   for (( step=1; step<=max; step++ )); do
+    (( _zai_ag_hot )) && { _zai_warn "已中断本轮任务。"; _zai_ag_hot=0; break; }
     payload=$(_zai_payload_msgs "$model" "$msgsfile" "$temp" "$stream")
     if (( $(_zai_var ZAI_DEBUG 0) )); then
       _zai_warn "== [debug] agent step=$step payload =="
@@ -1248,7 +1307,25 @@ _zai_agent_turn() {
       break
     fi
     toolname=$(_zai_ag_jget "$tjson" '.name')
-    print -r -- "${_zai_c_dim}-- 工具: $toolname --${_zai_c_rst}"
+    # 计划确认: 模型给出 plan 数组时, 先列计划征得同意再动手
+    if (( ! _zai_ag_plan_ok )); then
+      plan=$(print -r -- "$content" | jq -c '.plan // []' 2>/dev/null)
+      nplan=$(print -r -- "$plan" | jq '. | length' 2>/dev/null)
+      if (( nplan > 0 )); then
+        print -r -- "${_zai_c_cyan}计划(${nplan} 步):${_zai_c_rst}"
+        for (( pl=0; pl<nplan; pl++ )); do
+          print -r -- "  $(( pl + 1 )). $(print -r -- "$plan" | jq -r --argjson i "$pl" '.[$i] // ""' 2>/dev/null)"
+        done
+        print -rn -- "按此计划逐步执行? [y/N]: "
+        read -r pl
+        if [[ $pl != [yY] ]]; then
+          print -r -- "好的, 本轮先不动手。想怎么改直接说, 或换个说法。"
+          break
+        fi
+        _zai_ag_plan_ok=1
+      fi
+    fi
+    print -r -- "${_zai_c_dim}-- 步骤 ${step}/${max} · 工具: $toolname --${_zai_c_rst}"
     _zai_ag_tool_run "$tjson"
     res=$_zai_ag_result
     jq -nc --arg c "$content" '{role:"assistant",content:$c}' >> "$msgsfile"
@@ -1273,21 +1350,61 @@ _zai_agent_turn() {
 
 _zai_agent_repl() {
   emulate -L zsh
-  local line t
+  local line t ml=0 buf=''
   if [[ ! -t 0 ]]; then _zai_warn "ai chat 需要在交互式终端里运行。"; return 1; fi
   [[ -n ${_zai_sess_anchor:-} ]] || _zai_sess_anchor=$PWD
   _zai_ag_ensure_file
   print -r -- "${_zai_c_cyan}== zai agent 会话 ==${_zai_c_rst}"
   print -r -- "锚点目录: ${_zai_sess_anchor}   会话文件: $(_zai_ag_file)"
-  print -r -- "直接输入要说的话; 斜杠命令: /persona 人设 · /remember 记忆 /mem 查看 · /new /hist /dir /help /quit"
+  print -r -- "直接输入要说的话; /m 多行输入(Ctrl-C 中断本轮); /help 查看斜杠命令; /quit 退出"
+  setopt LOCAL_TRAPS
+  trap 'print -r -- ""; _zai_ag_hot=1' INT
   while true; do
-    print -rn -- "${_zai_c_cyan}zai❯${_zai_c_rst} "
+    if (( _zai_ag_hot )); then
+      _zai_warn "已中断。"
+      _zai_ag_hot=0; ml=0; buf=''
+      continue
+    fi
+    if (( ml )); then
+      print -rn -- "${_zai_c_dim}…zai❯${_zai_c_rst} "
+    else
+      print -rn -- "${_zai_c_cyan}zai❯${_zai_c_rst} "
+    fi
     if ! read -r line; then print -r -- ''; break; fi
     line=${line%%$'\r'}
+    if (( _zai_ag_hot )); then
+      _zai_warn "已中断本轮输入。"
+      _zai_ag_hot=0; ml=0; buf=''
+      continue
+    fi
+    if (( ml )); then
+      case $line in
+        '/m'|'/quit'|'/exit')
+          buf=''; ml=0
+          print -r -- "(多行模式退出)"
+          [[ $line == '/quit' || $line == '/exit' ]] && break
+          continue ;;
+      esac
+      if [[ -z $line ]]; then
+        if [[ -n $buf ]]; then
+          local send=$buf
+          buf=''; ml=0
+          _zai_agent_turn "$send"
+        else
+          print -r -- "(先输入内容; 空行回车 = 结束多行发送; /m 直接退出多行)"
+        fi
+        continue
+      fi
+      buf+="${buf:+$'\n'}$line"
+      continue
+    fi
     t=${line//[[:space:]]/}
     [[ -z $t ]] && continue
     case $line in
       '/quit'|'/exit') break ;;
+      '/m') ml=1; buf=''
+            print -r -- "多行模式: 逐行输入(可粘贴), 空行回车发送; /m 放弃退出"
+            continue ;;
       '/new') _zai_ag_new; print -r -- "会话已清空。" ;;
       '/hist') _zai_ag_list ;;
       '/dir') print -r -- "锚点目录: ${_zai_sess_anchor:-$PWD}" ;;
@@ -1298,7 +1415,12 @@ _zai_agent_repl() {
       '/help') _zai_agent_help ;;
       *) _zai_agent_turn "$line" ;;
     esac
+    if (( _zai_ag_hot )); then
+      _zai_warn "本轮已被 Ctrl-C 中断(状态已尽量保留)。"
+      _zai_ag_hot=0
+    fi
   done
+  trap - INT
   return 0
 }
 
@@ -1326,6 +1448,7 @@ _zai_ag_persona() { # 会话内查看/切换人设: /persona [名字]
 _zai_agent_help() {
   emulate -L zsh
   print -r -- "agent 会话命令:"
+  print -r -- "  /m      多行输入模式(空行回车发送; Ctrl-C 中断当前操作)"
   print -r -- "  /persona [名字]  查看/切换人设(如 /persona cmd-expert)"
   print -r -- "  /remember [-g] <话>  记住一条(默认记入本目录项目记忆; -g 记全局)"
   print -r -- "  /mem    查看记忆(全局+项目)"
