@@ -697,13 +697,13 @@ _zai_prompt_agent() { # 给 agent 会话的 system 提示(含工具契约)
 - read:   {"path":"文件或目录, 相对锚点或绝对"}
 - grep:   {"pattern":"正则","path":"可选, 默认锚点目录递归"}
 - ls:     {"path":"可选, 默认锚点目录"}
-- shell:  {"cmd":"仅一条独立 shell 命令"}
+- shell:  {"cmd":"一个连贯操作所需的 shell 命令"}
 - edit:   {"path":"文件","edits":[{"old":"必须唯一匹配的原文(含缩进, 逐字符)","new":"替换内容(可为空)"}]}
 - create: {"path":"文件","content":"完整新文件内容"}
 
 规则:
 1. 完成目标后立刻 done=true，且 done=true 时 text **必须非空**：用当前人设告诉用户完成了什么、结果如何；若没完成，要说明原因和下一步。不能执行完就沉默，也不能输出裸 JSON 给用户。
-2. 每步最多一个 tool。shell 的 cmd 也只能是一条独立命令：严禁用 ;、&&、||、管道、换行或 here-doc 拼接命令；不要用 echo 拼标题再批量检查。要检查多项内容就分成多次 tool 调用，写文件请用 create/edit，不要用 tee + here-doc。
+2. 每步最多一个 tool，每个 tool 只做一件连贯的事。shell 可以按需要使用管道、&& 或多条紧密依赖的命令，不能因此中断任务；但别把无关的诊断、标题 echo 和批量检查硬塞进同一次调用。能用 read/grep/ls 的查询优先用对应工具；写文件优先用 create/edit。
 3. shell 在用户当前 shell 执行: cd/export 真实生效; 危险命令会被 zai 拦截并要求用户输入 f 确认。
 4. edit 前尽量先 read 锚定上下文; edits 逐条依次应用, old 必须唯一, 不唯一/找不到 zai 会报错, 你再调整。
 5. text 会逐条展示给用户，必须符合当前人设。工具执行前可用一句简短说明；工具结果回来后，完成任务时一定要给出有温度的总结。大段结果在工具结果里看，别塞到 text 外。
@@ -837,14 +837,6 @@ _zai_ag_tool_ls() {
   _zai_ag_result=$out
 }
 
-_zai_is_compound_shell() { # agent 的 shell 工具一次只允许一条命令
-  emulate -L zsh
-  local cmd=$1
-  # 这里故意采用保守规则。模型要组合读取/过滤时应改用 read、grep、ls，
-  # 写入多行内容应改用 create/edit；这样终端里每个动作都可见、可追踪。
-  [[ $cmd == *';'* || $cmd == *'&&'* || $cmd == *'||'* || $cmd == *'|'* || $cmd == *$'\n'* || $cmd == *$'\r'* ]]
-}
-
 _zai_ag_tool_shell() {
   emulate -L zsh
   local tj=$1 args cmd a b out txt policy
@@ -856,11 +848,6 @@ _zai_ag_tool_shell() {
     return
   fi
   cmd=$(_zai_ag_jget "$args" '.cmd')
-  if _zai_is_compound_shell "$cmd"; then
-    _zai_ag_result="错误: shell 每次只能执行一条独立命令，不能使用 ;、&&、||、管道、换行或 here-doc。请拆成多个 tool 调用；写文件请使用 create/edit。"
-    _zai_warn "已拒绝合并的 shell 命令；请让 agent 逐条执行。"
-    return
-  fi
   policy=$(_zai_var ZAI_DESTRUCTIVE_POLICY warn)
   case $policy in warn|block|allow) ;; *) policy=warn ;; esac
   print -r -- "${_zai_c_grn}zai>${_zai_c_rst} ${_zai_c_dim}$cmd${_zai_c_rst}"
@@ -1036,9 +1023,11 @@ _zai_agent_turn() {
   _zai_ag_hist_lines >> "$msgsfile"
   jq -nc --arg u "$req" '{role:"user",content:$u}' >> "$msgsfile"
 
-  max=$(_zai_var ZAI_MAX_STEPS 6)
-  [[ $max =~ ^[0-9]+$ ]] || max=6
-  (( max > 0 )) || max=6
+  # 6 步不足以完成常见的“检查 → 修改 → 验证 → 收尾”任务；保留上限防止
+  # 异常循环，但让默认的一轮交互足够像真正的 agent。
+  max=$(_zai_var ZAI_MAX_STEPS 12)
+  [[ $max =~ ^[0-9]+$ ]] || max=12
+  (( max > 0 )) || max=12
   _zai_ag_last_text=''
   _zai_ag_used=0
   for (( step=1; step<=max; step++ )); do
@@ -1145,6 +1134,8 @@ _zai_agent_turn() {
   if (( step > max )); then
     print -r -- ""
     _zai_warn "已达单轮最大步数($max); 若任务未完成, 请再说一句继续。"
+    _zai_ag_last_text="我这一轮已经替你完成了 $max 个操作，进度也记住啦。还差的部分你说一声“继续”，我就从这里接着做，不会让你对着空白等。"
+    print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $_zai_ag_last_text"
     if (( $(_zai_var ZAI_MEMORY 1) )); then
       local tsnote
       tsnote=$(date '+%F %T' 2>/dev/null)
