@@ -87,7 +87,7 @@ zai: 我先看一下相关代码。
 | `ZAI_INTERCEPT` | `1` | `0` = 关闭"直接输入中文"的自动拦截 |
 | `ZAI_DESTRUCTIVE_POLICY` | `warn` | 高风险 shell 命令策略：`warn` 要求输入 `f`；`block` 直接拒绝；`allow` 仍需 y/N 确认 |
 | `ZAI_STREAM` | `1` | `json` 兼容模式下：`1` = 流式接收，`0` = 整包等待；`native` 工具循环为完整保留调用 ID 与参数，固定使用整包响应 |
-| `ZAI_TOOL_MODE` | `native` | `native` = 标准 Chat Completions function calling（推荐）；端点确实不支持 `tools` 时才设为 `json` 使用旧协议 |
+| `ZAI_TOOL_MODE` | `native` | `native` = 标准 Chat Completions function calling（推荐）；若端点返回“不支持 tools”，会在同一端点自动降级为 `json` 旧协议；也可手动设为 `json` |
 | `ZAI_SHOW_THINK` | `0` | 默认**静默等待**（不显示思考链/占位行），结果直接显示；`1` = 实时展开模型的思考过程 |
 | `ZAI_SESSION` | `1` | `0` = 关闭"按目录续接会话"的记忆 |
 | `ZAI_MEMORY` | `1` | `0` = 关闭记忆（不注入、不记录） |

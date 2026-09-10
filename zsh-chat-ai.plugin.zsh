@@ -1074,9 +1074,13 @@ _zai_agent_turn() {
     if [[ $code != 200 ]]; then
       api_error=$(_zai_api_err "$body")
       if [[ $mode == native && $code == 400 && $api_error == *[tT][oO][oO][lL]* ]]; then
-        _zai_error "当前端点未实现 Chat Completions tools/function calling；请换支持 tools 的 OpenAI 兼容模型，或临时设置 ZAI_TOOL_MODE=json。"
-        rm -f "$msgsfile"
-        return 1
+        # 一些服务只实现文本 Chat Completions，却不实现 tools。端点和模型
+        # 都由用户配置，不应因此中断任务：同一端点自动改用旧 JSON 契约重试。
+        _zai_warn "当前模型未实现 tools/function calling；正在用同一兼容端点自动切换到 JSON 工具循环继续任务。"
+        mode=json
+        force_nonstream=1
+        blank_retries=0
+        continue
       fi
       case $code in
         401|403) _zai_error "API key 无效或没有权限 (HTTP $code)" ;;
