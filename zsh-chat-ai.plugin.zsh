@@ -1092,6 +1092,12 @@ _zai_agent_turn() {
       _zai_log "断点已写入项目记忆, 下次可直接说: 继续上次的任务"
     fi
   fi
+  # 即使中间执行过工具，最后也不能把空白回复写入会话或留给用户一个空终端。
+  local final_nonblank=${_zai_ag_last_text//[[:space:]]/}
+  if [[ -z $final_nonblank ]]; then
+    _zai_ag_last_text="(模型本轮未提供可显示的最终回复；请重试或换一种说法)"
+    print -r -- "${_zai_c_dim}zai: $_zai_ag_last_text${_zai_c_rst}"
+  fi
   # 记录会话(与快速请求同一份历史)
   _zai_ag_append user "$req"
   if (( _zai_ag_used )); then   # 工具输出也存会话, 供下一条"继续"读到真实结果
