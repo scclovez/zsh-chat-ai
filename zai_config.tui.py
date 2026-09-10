@@ -34,6 +34,7 @@ ORDER = [
     "ZAI_DEBUG",
     "ZAI_STREAM",
     "ZAI_SHOW_THINK",
+    "ZAI_TOOL_MODE",
 ]
 
 LABELS = {
@@ -49,6 +50,7 @@ LABELS = {
     "ZAI_DEBUG": "调试输出(脱敏)",
     "ZAI_STREAM": "流式接收(整包等待 = 关)",
     "ZAI_SHOW_THINK": "展开显示思考链",
+    "ZAI_TOOL_MODE": "工具协议(native / json)",
 }
 
 DEFAULTS = {
@@ -64,12 +66,16 @@ DEFAULTS = {
     "ZAI_DEBUG": "0",
     "ZAI_STREAM": "1",
     "ZAI_SHOW_THINK": "0",
+    "ZAI_TOOL_MODE": "native",
 }
 
 BOOLS = {
     "ZAI_INTERCEPT", "ZAI_INCLUDE_CONTEXT", "ZAI_DEBUG", "ZAI_STREAM", "ZAI_SHOW_THINK",
 }
-CHOICES = {"ZAI_DESTRUCTIVE_POLICY": ("warn", "block", "allow")}
+CHOICES = {
+    "ZAI_DESTRUCTIVE_POLICY": ("warn", "block", "allow"),
+    "ZAI_TOOL_MODE": ("native", "json"),
+}
 INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN"}
 FLOATS = {"ZAI_TEMPERATURE"}
 SECRET = {"ZAI_API_KEY"}

@@ -65,6 +65,7 @@ zai: 我先看一下相关代码。
 ```
 
 - **能做什么**：闲聊、问答，也可以读文件 / 搜代码 / 执行命令 / 改代码 / 新建文件，多步直到完成或你叫停；
+- **原生工具循环**：默认使用 OpenAI 兼容的 Chat Completions `tools` / `tool_calls` / `role: tool` 协议；不依赖 Responses API、ChatGPT 或某一家服务商。只要端点实现该协议即可使用；
 - **确认策略**：`read`/`grep`/`ls` 等只读操作自动执行；`shell` 沿用命令确认与危险命令门禁；**`edit`/`create` 改文件前先展示 diff，你按 y/N 决定**；
 - **权限**：默认可修改你自己目录（`$HOME`）内的文件；`$HOME` 之外（系统级，如 `/etc`）**每次会弹"请求权限"**，同意才放行；
 - 会话内斜杠命令：`/persona` 人设 · `/remember [-g]` 记住 · `/mem` 看记忆 · `/forget [-g]` 删记忆 · `/new` 清空 · `/hist` 历史 · `/dir` 锚点 · `/help` · `/quit` 退出；
@@ -85,7 +86,8 @@ zai: 我先看一下相关代码。
 | `ZAI_MODEL` | `deepseek-v4-flash` | 模型，可换 `deepseek-v4-pro` |
 | `ZAI_INTERCEPT` | `1` | `0` = 关闭"直接输入中文"的自动拦截 |
 | `ZAI_DESTRUCTIVE_POLICY` | `warn` | 高风险 shell 命令策略：`warn` 要求输入 `f`；`block` 直接拒绝；`allow` 仍需 y/N 确认 |
-| `ZAI_STREAM` | `1` | `1` = 流式接收；`0` = 整包等待（不流式） |
+| `ZAI_STREAM` | `1` | `json` 兼容模式下：`1` = 流式接收，`0` = 整包等待；`native` 工具循环为完整保留调用 ID 与参数，固定使用整包响应 |
+| `ZAI_TOOL_MODE` | `native` | `native` = 标准 Chat Completions function calling（推荐）；端点确实不支持 `tools` 时才设为 `json` 使用旧协议 |
 | `ZAI_SHOW_THINK` | `0` | 默认**静默等待**（不显示思考链/占位行），结果直接显示；`1` = 实时展开模型的思考过程 |
 | `ZAI_SESSION` | `1` | `0` = 关闭"按目录续接会话"的记忆 |
 | `ZAI_MEMORY` | `1` | `0` = 关闭记忆（不注入、不记录） |
