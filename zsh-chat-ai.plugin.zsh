@@ -958,10 +958,10 @@ _zai_ag_tool_run() { # $1=tool json; 执行并把结果文本写入 _zai_ag_resu
   esac
 }
 
-_zai_ag_call() { # $1 payload $2 model $3 key; 设 _zai_http_code/_zai_api_body; 返回 0/1(仅传输层)
+_zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式; 设响应全局变量
   emulate -L zsh
-  local payload=$1 model=$2 key=$3
-  if (( $(_zai_var ZAI_STREAM 1) )); then
+  local payload=$1 model=$2 key=$3 force_nonstream=${4:-0}
+  if (( ! force_nonstream && $(_zai_var ZAI_STREAM 1) )); then
     _zai_api_stream "$payload" "$model" "$key" || return 1
   else
     _zai_api_call "$payload" "$model" "$key" || return 1
@@ -975,7 +975,7 @@ _zai_agent_turn() {
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
   local content text text_nonblank tjson done toolname res
   local plan nplan pl
-  local -i step max blank_retries=0
+  local -i step max blank_retries=0 force_nonstream=0
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
   key=$(_zai_var ZAI_API_KEY "")
   [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
@@ -1011,7 +1011,7 @@ _zai_agent_turn() {
       _zai_warn "== [debug] agent step=$step payload =="
       print -r -- "$(_zai_redact "$payload")"
     fi
-    _zai_ag_call "$payload" "$model" "$key" || { rm -f "$msgsfile"; return 1; }
+    _zai_ag_call "$payload" "$model" "$key" "$force_nonstream" || { rm -f "$msgsfile"; return 1; }
     code=$_zai_http_code
     body=$_zai_api_body
     if [[ $code != 200 ]]; then
@@ -1053,7 +1053,8 @@ _zai_agent_turn() {
       # 自动重试一次；这样不会重跑工具，也不会无限消耗请求额度。
       if [[ -z $text && $blank_retries -eq 0 ]]; then
         blank_retries=1
-        print -r -- "${_zai_c_dim}zai: 模型返回空白，正在自动重试…${_zai_c_rst}"
+        force_nonstream=1
+        print -r -- "${_zai_c_dim}zai: 模型返回空白，正改用非流式方式自动重试…${_zai_c_rst}"
         jq -nc --arg c "$content" '{role:"assistant",content:$c}' >> "$msgsfile"
         jq -nc --arg r "上一条回复没有任何可显示文字。请按约定 JSON 重新回复；若任务已完成，请在 text 中给出简明结果。" \
           '{role:"user",content:$r}' >> "$msgsfile"
