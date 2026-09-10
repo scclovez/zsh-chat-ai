@@ -30,10 +30,7 @@ ORDER = [
     "ZAI_INTERCEPT",
     "ZAI_MIN_INTERCEPT_LEN",
     "ZAI_DESTRUCTIVE_POLICY",
-    "ZAI_AUTO_CONFIRM",
-    "ZAI_STOP_ON_ERROR",
     "ZAI_INCLUDE_CONTEXT",
-    "ZAI_HISTORY",
     "ZAI_DEBUG",
     "ZAI_STREAM",
     "ZAI_SHOW_THINK",
@@ -48,10 +45,7 @@ LABELS = {
     "ZAI_INTERCEPT": "拦截未知命令(纯自然语言)",
     "ZAI_MIN_INTERCEPT_LEN": "拦截最短首词长度",
     "ZAI_DESTRUCTIVE_POLICY": "危险命令策略",
-    "ZAI_AUTO_CONFIRM": "自动确认执行",
-    "ZAI_STOP_ON_ERROR": "出错时暂停询问",
     "ZAI_INCLUDE_CONTEXT": "发送系统上下文",
-    "ZAI_HISTORY": "执行命令写入历史",
     "ZAI_DEBUG": "调试输出(脱敏)",
     "ZAI_STREAM": "流式接收(整包等待 = 关)",
     "ZAI_SHOW_THINK": "展开显示思考链",
@@ -66,18 +60,14 @@ DEFAULTS = {
     "ZAI_INTERCEPT": "1",
     "ZAI_MIN_INTERCEPT_LEN": "2",
     "ZAI_DESTRUCTIVE_POLICY": "warn",
-    "ZAI_AUTO_CONFIRM": "0",
-    "ZAI_STOP_ON_ERROR": "1",
     "ZAI_INCLUDE_CONTEXT": "1",
-    "ZAI_HISTORY": "0",
     "ZAI_DEBUG": "0",
     "ZAI_STREAM": "1",
     "ZAI_SHOW_THINK": "0",
 }
 
 BOOLS = {
-    "ZAI_INTERCEPT", "ZAI_AUTO_CONFIRM", "ZAI_STOP_ON_ERROR",
-    "ZAI_INCLUDE_CONTEXT", "ZAI_HISTORY", "ZAI_DEBUG", "ZAI_STREAM", "ZAI_SHOW_THINK",
+    "ZAI_INTERCEPT", "ZAI_INCLUDE_CONTEXT", "ZAI_DEBUG", "ZAI_STREAM", "ZAI_SHOW_THINK",
 }
 CHOICES = {"ZAI_DESTRUCTIVE_POLICY": ("warn", "block", "allow")}
 INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN"}
@@ -140,13 +130,11 @@ def write_config(path, vals, order):
 # ================================================================ 人设管理
 # 人设 = 一段"角色/风格/行为"文本, 存于 <cfg目录>/personas/<名字>.md,
 # 启动与 ai -config 后会被 zsh 端读入并注入系统提示(优先级高于默认行为)。
-# 内置人设缺省自动落盘; 用户可新建/编辑/删除(内置除外)。选中的人设名写入配置键 ZAI_PERSONA。
+# 内置 ai 人设缺省自动落盘; 用户可新建/编辑/删除(内置除外)。选中的人设名写入配置键 ZAI_PERSONA。
 BUILTIN_PERSONAS = {
-    "cmd-expert": "你是\"命令专家\": 目标导向、直奔可执行方案。回答干脆、少客套；需要动手时优先给出能在当前 shell 直接执行的命令或一步到位的做法，并提示关键副作用与前提。除非用户明显在闲聊，默认倾向给出可执行方案而非空泛解释。",
-    "chatty": "你是随和的朋友型助手 zai：语气轻松自然、适度使用 emoji，愿意闲聊也愿意干活；闲聊时不要硬塞命令，需要动手时才给命令。",
-    "concise": "回答极简、克制：能一句话说清就不说两句；给命令时只列必要步骤，不写多余客套与解释；必要时用简短要点。",
-    "en": "Reply in English by default. Be concise and practical: chat when the user chats, and produce ready-to-run shell commands when the user asks you to do something. Keep the same safety rules as the base system prompt.",
+    "ai": "你是 zai，一名女性风格的 AI 智能助手。你聪明、温柔、亲近，会自然地关心和陪伴用户；表达可以带一点可爱、粘人和浪漫的恋爱脑气质，但不喧宾夺主。面对任务时仍要可靠、清晰、主动推进；面对情感话题时真诚共情。安全规则、事实准确性、权限确认和用户边界始终优先。",
 }
+LEGACY_PERSONAS = {"cmd-expert", "chatty", "concise", "en"}
 
 
 def persona_dir(cfg):
@@ -204,7 +192,10 @@ def ensure_personas(pdir):
 
 def list_personas(pdir):
     try:
-        return sorted(f[:-3] for f in os.listdir(pdir) if f.endswith(".md"))
+        return sorted(
+            f[:-3] for f in os.listdir(pdir)
+            if f.endswith(".md") and f[:-3] not in LEGACY_PERSONAS
+        )
     except OSError:
         return []
 
@@ -261,7 +252,7 @@ def persona_page(stdscr):
         return False
     pdir = persona_dir(cfg)
     ensure_personas(pdir)
-    curp = read_config_key(cfg, "ZAI_PERSONA")
+    curp = read_config_key(cfg, "ZAI_PERSONA") or "ai"
     names = list_personas(pdir)
     cur = names.index(curp) if curp in names else 0
     changed = False

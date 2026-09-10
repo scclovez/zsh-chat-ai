@@ -84,22 +84,20 @@ zai: 我先看一下相关代码。
 |---|---|---|
 | `ZAI_MODEL` | `deepseek-v4-flash` | 模型，可换 `deepseek-v4-pro` |
 | `ZAI_INTERCEPT` | `1` | `0` = 关闭"直接输入中文"的自动拦截 |
-| `ZAI_AUTO_CONFIRM` | `0` | `1` = 不再逐个问 y/N，直接执行（危险命令仍要确认） |
-| `ZAI_DRY_RUN` | `0` | `1` = 只展示命令、绝不执行（试效果用） |
+| `ZAI_DESTRUCTIVE_POLICY` | `warn` | 高风险 shell 命令策略：`warn` 要求输入 `f`；`block` 直接拒绝；`allow` 仍需 y/N 确认 |
 | `ZAI_STREAM` | `1` | `1` = 流式接收；`0` = 整包等待（不流式） |
 | `ZAI_SHOW_THINK` | `0` | 默认**静默等待**（不显示思考链/占位行），结果直接显示；`1` = 实时展开模型的思考过程 |
 | `ZAI_SESSION` | `1` | `0` = 关闭"按目录续接会话"的记忆 |
 | `ZAI_MEMORY` | `1` | `0` = 关闭记忆（不注入、不记录） |
 | `ZAI_SUMMARIZE` | `1` | 会话超窗时自动把旧对话压成要点进项目记忆；`0` = 只截断不摘要 |
-| `ZAI_PERSONA` | （空） | 当前人设名（如 `cmd-expert` / `chatty`），可 `export` 或 `ai -config → p` 选用 |
+| `ZAI_PERSONA` | `ai` | 当前人设名；默认内置 `ai`，也可 `export` 或 `ai -config → p` 选用 |
 | `ZAI_CMD` | `ai` | 显式入口的命令名（改名字防冲突） |
 
 ### 人设
 
-- 内置四套：`cmd-expert`（命令专家）/ `chatty`（闲聊）/ `concise`（极简）/ `en`（英文），首次使用自动写入 `~/.config/zsh-chat-ai/personas/`；
+- 默认且唯一的内置人设是 `ai`：女性风格的智能助手，聪明、温柔、亲近，带一点可爱、粘人和浪漫的恋爱脑气质；首次使用会写入 `~/.config/zsh-chat-ai/personas/ai.md`；
 - 选用：`ai -config` 按 `p` 进入人设页（`j/k` 选择，`Enter` 选用，`n` 新建、`e` 编辑、`d` 删除——新建/编辑会打开 `$EDITOR`，默认 `vi`）；保存后当前 shell 立即生效；
-- 会话内快速切换：`ai chat` 里输入 `/persona cmd-expert`（仅当前会话；想持久化再 export 或走配置页）；
-- 人设文本注入系统提示且**优先于默认行为**（如命令专家倾向给命令）；安全底线（key 不外泄、命令先确认、越界要授权）不受人设影响。
+- 会话内可用 `/persona` 查看当前人设；人设文本注入系统提示且**优先于默认行为**。安全底线（key 不外泄、命令先确认、越界要授权）不受人设影响。
 
 ## 常见问题
 
