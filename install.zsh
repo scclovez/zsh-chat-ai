@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # =============================================================================
-# zsh-chat-ai 安装/卸载脚本 (幂等, 不破坏 .zshrc 其它内容)
+# zsh-chat-ai 安装/卸载脚本 (幂等, 不破坏 .zshrc 其它内容; 移动目录后可修复路径)
 #
 #   zsh install.zsh                # 默认: source 模式 —— 在 ~/.zshrc 末尾追加托管块
 #   zsh install.zsh --mode plugin  # 插件模式 —— 软链到 oh-my-zsh 并加入 plugins=()
@@ -38,8 +38,8 @@ END_MARK='# ===== end zsh-chat-ai ====='
 
 [[ -f $PLUGIN_FILE ]] || { print -u2 -r -- "找不到 $PLUGIN_FILE"; exit 1; }
 
-# 幂等: 判断托管块是否已存在于 .zshrc
-has_block() { [[ -f $ZRC ]] && grep -Fq "$BEGIN_MARK" "$ZRC"; }
+# 幂等: 判断完整托管块是否已存在于 .zshrc
+has_block() { [[ -f $ZRC ]] && grep -Fq "$BEGIN_MARK" "$ZRC" && grep -Fq "$END_MARK" "$ZRC"; }
 # 幂等: plugin 模式软链是否已存在且指向本目录
 has_link()   { [[ -L $LINK_DIR ]] && [[ $(readlink "$LINK_DIR") == "$PLUGIN_DIR" ]]; }
 
@@ -61,6 +61,32 @@ block_text() {
   print -r -- "$END_MARK"
 }
 
+# 用当前目录重写托管块。仓库移动后，旧的绝对路径会在此被修正。
+rewrite_source_block() {
+  local tmp line
+  local -i in_block=0 seen=0
+  tmp=$(mktemp "${ZRC}.zai.XXXXXX") || { warn "无法创建临时文件以更新 $ZRC"; return 1; }
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == "$BEGIN_MARK" ]]; then
+      (( seen += 1 ))
+      block_text >> "$tmp"
+      in_block=1
+      continue
+    fi
+    if (( in_block )); then
+      [[ $line == "$END_MARK" ]] && in_block=0
+      continue
+    fi
+    print -r -- "$line" >> "$tmp"
+  done < "$ZRC"
+  if (( seen != 1 || in_block )); then
+    rm -f "$tmp"
+    warn "托管块格式异常，未修改 $ZRC。"
+    return 1
+  fi
+  mv "$tmp" "$ZRC"
+}
+
 ensure_trailing_newline() {
   # 保证文件末尾有换行, 避免追加内容粘到上一行
   [[ -s $ZRC ]] || { print -r -- "" > "$ZRC"; return; }
@@ -69,7 +95,13 @@ ensure_trailing_newline() {
 
 install_source_mode() {
   if has_block; then
-    say "已在 $ZRC 中存在托管块, 跳过。"
+    say "更新 $ZRC 中的托管块，确保指向当前目录: $PLUGIN_DIR"
+    if (( DO )); then
+      print -r -- "   [dry-run] 将把已有托管块改为:"
+      print -r -- "$(block_text)" | sed 's/^/      /'
+    else
+      rewrite_source_block || return 1
+    fi
     return 0
   fi
   say "在 $ZRC 末尾追加托管块 (source 模式)。"
@@ -97,6 +129,9 @@ uninstall_source_mode() {
 install_plugin_mode() {
   if has_link; then
     say "软链 $LINK_DIR -> $PLUGIN_DIR 已存在。"
+  elif [[ -L $LINK_DIR ]]; then
+    say "更新旧软链 $LINK_DIR -> $PLUGIN_DIR"
+    dry_or_do "ln -sfn \"$PLUGIN_DIR\" \"$LINK_DIR\""
   else
     if [[ -e $LINK_DIR || -L $LINK_DIR ]]; then
       warn "$LINK_DIR 已存在但不是指向本目录, 不覆盖。可先 --uninstall 或手动删除。"
