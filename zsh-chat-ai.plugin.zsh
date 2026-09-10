@@ -990,7 +990,7 @@ _zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式; 设响应
 _zai_agent_turn() {
   emulate -L zsh
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
-  local content raw_content text text_nonblank tjson done toolname res
+  local content raw_content native_call text text_nonblank tjson done toolname res
   local plan nplan pl
   local -i step max blank_retries=0 force_nonstream=0
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
@@ -1040,11 +1040,19 @@ _zai_agent_turn() {
       rm -f "$msgsfile"
       return 1
     fi
-    raw_content=$(print -r -- "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-    raw_content=$(print -r -- "$raw_content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
-    content=$(_zai_normalize_agent_content "$raw_content")
-    local -i norm_rc=$?
-    (( norm_rc == 0 )) || content=$raw_content
+    native_call=$(print -r -- "$body" | jq -c '.choices[0].message.tool_calls[0] // empty' 2>/dev/null)
+    if [[ -n $native_call ]]; then
+      # OpenAI-compatible Chat Completions 的原生 function/tool call。
+      content=$(print -r -- "$native_call" | jq -c '
+        .function as $f | ($f.arguments | fromjson) as $args |
+        {text:"", done:false, tool:{name:$f.name, args:$args}}' 2>/dev/null)
+    else
+      raw_content=$(print -r -- "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+      raw_content=$(print -r -- "$raw_content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
+      content=$(_zai_normalize_agent_content "$raw_content")
+      local -i norm_rc=$?
+      (( norm_rc == 0 )) || content=$raw_content
+    fi
     # 兼容部分模型在纯工具调用时省略 text（等价于空文本）。
     if [[ -z $content ]] || ! print -r -- "$content" | jq -e '((.text|type)=="string" or .text==null) and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
       if [[ -n $content ]]; then
