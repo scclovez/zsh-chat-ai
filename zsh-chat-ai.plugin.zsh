@@ -748,6 +748,17 @@ EOF
   fi
 }
 
+# 在同一轮内切换工具协议时，首条 system 消息也必须同步替换；否则服务端会
+# 收到 JSON response_format，却仍看到“请调用原生工具”的提示，容易只返回空白。
+_zai_ag_reset_system() {
+  emulate -L zsh
+  local msgsfile=$1 sys=$2 tmp
+  tmp=$(_zai_ag_tmp)
+  jq -nc --arg s "$sys" '{role:"system",content:$s}' > "$tmp"
+  sed '1d' "$msgsfile" >> "$tmp"
+  mv -f "$tmp" "$msgsfile"
+}
+
 # ---------------------------------------------------------------- shell 安全分级
 # 高风险操作必须二次确认；普通非只读命令仍需要一次 y/N 确认。
 _zai_is_high_risk() {
@@ -1039,6 +1050,9 @@ _zai_agent_turn() {
   (( $(_zai_var ZAI_STREAM 1) )) || stream=false
   mode=$(_zai_var ZAI_TOOL_MODE native)
   case $mode in native|json) ;; *) mode=native ;; esac
+  # 本 shell 已确认当前兼容端点拒绝原生 tools 后，后续对话直接用 JSON
+  # 工具循环，不再让用户每一句话先等待一次必然失败的探测。
+  [[ $mode == native && ${_zai_native_tools_unsupported:-0} == 1 ]] && mode=json
   # SSE 中 tool_calls 的 arguments 会分片；为保证所有 OpenAI 兼容端点都能
   # 完整保留 call id 和参数，原生 tools 循环统一使用完整响应。
   [[ $mode == native ]] && stream=false
@@ -1077,7 +1091,10 @@ _zai_agent_turn() {
         # 一些服务只实现文本 Chat Completions，却不实现 tools。端点和模型
         # 都由用户配置，不应因此中断任务：同一端点自动改用旧 JSON 契约重试。
         _zai_warn "当前模型未实现 tools/function calling；正在用同一兼容端点自动切换到 JSON 工具循环继续任务。"
+        typeset -g _zai_native_tools_unsupported=1
         mode=json
+        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
+        _zai_ag_reset_system "$msgsfile" "$sys"
         force_nonstream=1
         blank_retries=0
         continue
@@ -1142,6 +1159,18 @@ _zai_agent_turn() {
       text=$(print -r -- "$assistant_msg" | jq -r '.content // ""' 2>/dev/null)
       text_nonblank=${text//[[:space:]]/}
       [[ -n $text_nonblank ]] || text=''
+      if [[ -z $text && $mode == native ]]; then
+        # 原生模式连正常文本都给空白时，通常说明该“兼容端点”并不完整实现
+        # tools。直接以同一请求上下文降级，不再无意义地重试原生协议。
+        _zai_warn "当前模型没有给出原生工具回复；正在用同一兼容端点自动切换到 JSON 工具循环继续任务。"
+        typeset -g _zai_native_tools_unsupported=1
+        mode=json
+        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
+        _zai_ag_reset_system "$msgsfile" "$sys"
+        force_nonstream=1
+        blank_retries=0
+        continue
+      fi
       if [[ -z $text && $blank_retries -eq 0 ]]; then
         blank_retries=1
         print -r -- "${_zai_c_dim}zai: 模型返回空白，正在自动重试…${_zai_c_rst}"
