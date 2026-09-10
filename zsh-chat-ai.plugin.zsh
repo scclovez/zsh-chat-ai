@@ -6,9 +6,9 @@
 #   ai -config                       # 打开 TUI 配置 API/模型/行为开关
 #   <一句不是命令的话…>               # 拦截未知命令 → 自动走 AI（见 ZAI_INTERCEPT）
 #
-# 流程: 自然语言 → DeepSeek API → 返回结构化命令清单 → 展示 → 确认 →
-#       【当前 shell】逐条执行（cd/export/sudo 密码提示等环境变更均生效）。
-# 默认绝不静默执行; 危险命令需额外输入 f 强制（见 ZAI_DESTRUCTIVE_POLICY）。
+# 流程: 自然语言 → DeepSeek API → agent 循环(读/搜/执行/编辑) → 完成。
+# 涉及执行命令或改文件时都会先征得确认；命令在【当前 shell】中执行，
+# 因而 cd/export/sudo 密码提示等环境变更均会生效。危险命令需额外输入 f。
 #
 # 命名约定: 内部函数 _zai_*、内部变量 _zai_*; 用户可配置变量全部为 ZAI_*。
 # 依赖: curl、jq; python3(ai -config 的 TUI / install.zsh 的 plugin 模式)。
@@ -478,7 +478,7 @@ _zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(C
     return 1
   fi
   if [[ $_zai_http_code != 200 ]]; then
-    _zai_api_body=$bodyerr          # 交给 _zai_ask 按状态码提示
+    _zai_api_body=$bodyerr          # 交给调用方按状态码提示
     return 0
   fi
   # 成功: 把流式 content 原文(仍是 JSON 转义串)还原成 JSON 文本, 再包成旧格式响应体
@@ -1349,7 +1349,7 @@ _zai_ag_call() { # $1 payload $2 model $3 key; 设 _zai_http_code/_zai_api_body;
 _zai_agent_turn() {
   emulate -L zsh
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
-  local content text tjson done toolname res
+  local content text text_nonblank tjson done toolname res
   local plan nplan pl
   local -i step max
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
@@ -1413,6 +1413,10 @@ _zai_agent_turn() {
       return 1
     fi
     text=$(print -r -- "$content" | jq -r '.text // ""')
+    # 某些兼容 API 偶尔返回仅由空格/换行组成的 text。不能把它当作已回复，
+    # 否则终端会只显示不可见字符，且绕过下面的空回复兜底。
+    text_nonblank=${text//[[:space:]]/}
+    [[ -n $text_nonblank ]] || text=''
     done=$(print -r -- "$content" | jq -r 'if .done == true then 1 else 0 end')
     if [[ -n $text ]]; then
       print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $text"
@@ -1639,8 +1643,7 @@ _zai_help() {
   print -r -- "zsh-chat-ai —— 在终端里用自然语言调用 AI: 聊天、生成命令、当 agent 改代码"
   print -r -- ""
   print -r -- "用法:"
-  print -r -- "  ${ZAI_CMD:-ai} <一句话>            直接进入 agent 会话(与 ai chat 同一上下文/记忆)"
-  print -r -- "  ${ZAI_CMD:-ai} run <一句话>        按'命令计划'一次处理(不走多轮工具循环)"
+  print -r -- "  ${ZAI_CMD:-ai} <一句话>            进入 agent 循环(与 ai chat 同一上下文/记忆)"
   print -r -- "  ${ZAI_CMD:-ai} chat               会话界面(斜杠: /new /persona /remember /m /help /quit)"
   print -r -- "  ${ZAI_CMD:-ai} chat <一句话>       单次 agent 请求(不进会话界面)"
   print -r -- "  ${ZAI_CMD:-ai} -config            打开 TUI 配置 API/模型/行为开关"
@@ -1660,18 +1663,15 @@ _zai_cmd_entry() {
     chat|-chat|--chat) shift
        if (( $# == 0 )); then _zai_agent_repl; else _zai_agent_turn "$*"; fi
        return $? ;;
+    # 旧版 `ai run` 的兼容别名；所有入口统一走 agent 循环。
     run|-run|--run) shift
-       [[ $# == 0 ]] && { print -u2 -r -- "用法: ${ZAI_CMD:-ai} run <一句话>"; return 1; }
-       _zai_force_cmd=1
-       _zai_ask "$*"
-       local r=$?
-       _zai_force_cmd=0
-       return $r ;;
+       [[ $# == 0 ]] && { print -u2 -r -- "用法: ${ZAI_CMD:-ai} <一句话>"; return 1; }
+       _zai_agent_turn "$*"
+       return $? ;;
   esac
   if (( $# == 0 )); then
-    print -r -- "用法: ${ZAI_CMD:-ai} <一句话>       直接进入 agent 会话(和 ai chat 同一上下文)"
+    print -r -- "用法: ${ZAI_CMD:-ai} <一句话>       进入 agent 循环(和 ai chat 同一上下文)"
     print -r -- "      ${ZAI_CMD:-ai} chat           进入会话界面(斜杠命令 /new /persona /remember …)"
-    print -r -- "      ${ZAI_CMD:-ai} run <话>       强制按'命令计划'处理(不走工具循环)"
     print -r -- "      ${ZAI_CMD:-ai} -config        打开 TUI 配置"
     print -r -- "也可以直接输入一句不是命令的话回车触发(可用 ZAI_INTERCEPT=0 关闭该拦截)。"
     return 1
