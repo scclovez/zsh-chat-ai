@@ -1093,7 +1093,13 @@ _zai_agent_turn() {
     if [[ $mode == native ]]; then
       # 标准 Chat Completions 循环：保留完整 assistant tool_calls，再用每个
       # tool_call_id 回传工具结果；绝不把结果伪装成 user 消息。
-      assistant_msg=$(print -r -- "$body" | jq -c '.choices[0].message | {role:"assistant",content:(.content // null),tool_calls:(.tool_calls // [])}' 2>/dev/null)
+      # 没有调用时必须省略 tool_calls；部分严格兼容端点会拒绝
+      # assistant.tool_calls: []，只接受实际存在且非空的调用数组。
+      assistant_msg=$(print -r -- "$body" | jq -c '
+        .choices[0].message |
+        {role:"assistant",content:(.content // null)} +
+        (if ((.tool_calls | type) == "array" and (.tool_calls | length) > 0)
+         then {tool_calls:.tool_calls} else {} end)' 2>/dev/null)
       native_calls=$(print -r -- "$assistant_msg" | jq -c '.tool_calls // []' 2>/dev/null)
       ncall=$(print -r -- "$native_calls" | jq 'length' 2>/dev/null)
       [[ $ncall =~ ^[0-9]+$ ]] || ncall=0
