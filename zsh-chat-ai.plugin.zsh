@@ -1025,7 +1025,8 @@ _zai_agent_turn() {
     fi
     content=$(print -r -- "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
     content=$(print -r -- "$content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
-    if [[ -z $content ]] || ! print -r -- "$content" | jq -e '(.text|type)=="string" and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
+    # 兼容部分模型在纯工具调用时省略 text（等价于空文本）。
+    if [[ -z $content ]] || ! print -r -- "$content" | jq -e '((.text|type)=="string" or .text==null) and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
       if [[ -n $content ]]; then
         # 不是约定 JSON: 当作纯文本回复展示(兼容)
         print -r -- "$content"
