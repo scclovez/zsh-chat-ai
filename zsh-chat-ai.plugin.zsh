@@ -942,6 +942,23 @@ _zai_ag_tool_create() {
 
 _zai_ag_jget() { emulate -L zsh; print -r -- "$1" | jq -r "$2 // empty" 2>/dev/null; }
 
+# 兼容某些模型在工具调用时返回的简化/DSML 混合格式：
+#   {"cmd":"..."}</...>
+# 将其归一为 agent 的标准 shell 工具对象。只有 cmd 为字符串时才接受，
+# 后续仍会经过长度校验与命令安全门禁。
+_zai_normalize_agent_content() {
+  emulate -L zsh
+  local raw=$1 clean compact
+  clean=${raw%%'</'*}
+  compact=$(print -r -- "$clean" | jq -c . 2>/dev/null) || return 1
+  if print -r -- "$compact" | jq -e '(.cmd | type) == "string" and (.tool == null)' >/dev/null 2>&1; then
+    jq -nc --argjson args "$compact" \
+      '{text:"",done:false,tool:{name:"shell",args:$args}}'
+  else
+    print -r -- "$compact"
+  fi
+}
+
 _zai_ag_tool_run() { # $1=tool json; 执行并把结果文本写入 _zai_ag_result
   emulate -L zsh
   local tj=$1 name
@@ -973,7 +990,7 @@ _zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式; 设响应
 _zai_agent_turn() {
   emulate -L zsh
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
-  local content text text_nonblank tjson done toolname res
+  local content raw_content text text_nonblank tjson done toolname res
   local plan nplan pl
   local -i step max blank_retries=0 force_nonstream=0
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
@@ -1023,8 +1040,11 @@ _zai_agent_turn() {
       rm -f "$msgsfile"
       return 1
     fi
-    content=$(print -r -- "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-    content=$(print -r -- "$content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
+    raw_content=$(print -r -- "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    raw_content=$(print -r -- "$raw_content" | sed -E '/^[[:space:]]*```(json)?[[:space:]]*$/d')
+    content=$(_zai_normalize_agent_content "$raw_content")
+    local -i norm_rc=$?
+    (( norm_rc == 0 )) || content=$raw_content
     # 兼容部分模型在纯工具调用时省略 text（等价于空文本）。
     if [[ -z $content ]] || ! print -r -- "$content" | jq -e '((.text|type)=="string" or .text==null) and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
       if [[ -n $content ]]; then
