@@ -975,7 +975,7 @@ _zai_agent_turn() {
   local req="$*" model key temp stream msgsfile sys ctx lang payload body code
   local content text text_nonblank tjson done toolname res
   local plan nplan pl
-  local -i step max
+  local -i step max blank_retries=0
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
   key=$(_zai_var ZAI_API_KEY "")
   [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
@@ -1049,6 +1049,16 @@ _zai_agent_turn() {
     fi
     tjson=$(print -r -- "$content" | jq -c '.tool // null')
     if [[ $done == 1 || $tjson == null || -z $tjson ]]; then
+      # 兼容 API 偶尔会给出仅含空白的 JSON text。把原响应和校正请求加入上下文，
+      # 自动重试一次；这样不会重跑工具，也不会无限消耗请求额度。
+      if [[ -z $text && $blank_retries -eq 0 ]]; then
+        blank_retries=1
+        print -r -- "${_zai_c_dim}zai: 模型返回空白，正在自动重试…${_zai_c_rst}"
+        jq -nc --arg c "$content" '{role:"assistant",content:$c}' >> "$msgsfile"
+        jq -nc --arg r "上一条回复没有任何可显示文字。请按约定 JSON 重新回复；若任务已完成，请在 text 中给出简明结果。" \
+          '{role:"user",content:$r}' >> "$msgsfile"
+        continue
+      fi
       if [[ -z $text && $_zai_ag_used == 0 ]]; then
         # 空回复兜底: 别让用户对着空白干等
         print -r -- "${_zai_c_dim}zai: 本轮没有可执行动作。请明确要做什么(例如: 给哪个子卷做快照、快照叫什么、要不要写进 GRUB)。${_zai_c_rst}"
