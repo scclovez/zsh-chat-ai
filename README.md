@@ -81,6 +81,8 @@ zai: 我先看一下相关代码。
 
 想调整时有两种办法：① 运行 `ai -config` 可视化修改（保存即生效）；② 在 `~/.zshrc` 里 `export` 后重开终端。
 
+TUI 打开时会根据当前 Chat Completions 地址自动请求同一 API 根下的 `GET /models`，在“模型”项按 Enter 即可选择；修改 API 地址或 Key 后会自动刷新，也可按 `r` 手动刷新。获取失败时仍可按 `e` 手动填写模型名。
+
 | 设置 | 默认 | 作用 |
 |---|---|---|
 | `ZAI_MODEL` | `deepseek-v4-flash` | 模型，可换 `deepseek-v4-pro` |

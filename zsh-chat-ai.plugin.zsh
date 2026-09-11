@@ -698,7 +698,7 @@ _zai_payload_msgs() {
 
 _zai_prompt_agent() { # 给 agent 会话的 system 提示(含工具契约)
   emulate -L zsh
-  local ctx=$1 lang=$2 mode=${3:-native} protocol
+  local ctx=$1 lang=$2 mode=${3:-native} social=${4:-0} protocol turn_policy
   if [[ $mode == native ]]; then
     protocol='工具以标准 function calling 方式提供。需要行动时直接调用一个工具；不要在文本中手写 JSON、工具对象、XML/DSML 或代码围栏。工具结果会以 tool 消息自动回传。任务完成、无法继续或需要用户决定时，不要调用工具，直接给用户自然语言答复。'
   else
@@ -706,6 +706,11 @@ _zai_prompt_agent() { # 给 agent 会话的 system 提示(含工具契约)
 {"text":"给用户的说明(工具步骤可为空；done=true 时必须非空)","done":true或false,"tool":null或{"name":"工具名","args":{...}}}
 - done=true 表示任务结束/本轮无需更多操作(纯聊天时也要 done=true, 把回答放 text)。
 - 需要继续做事时 done=false 且给出**一个** tool; 该 tool 的结果会作为下一条消息回给你, 你可以继续, 直到完成。'
+  fi
+  if (( social )); then
+    turn_policy='本轮是单纯问候/呼唤。只进行轻松自然的聊天，绝对不要调用工具，也不要继续任何旧任务。'
+  else
+    turn_policy='当前这条用户消息优先级最高。除非用户明确说“继续/接着做/恢复上次任务”，否则不要自行恢复历史里的未完成任务。'
   fi
   cat <<EOF
 你以 "zai" agent 身份在用户的终端里工作: 既能闲聊, 也能在当前项目里读代码/改文件/执行命令, 边干边聊。
@@ -718,6 +723,7 @@ _zai_prompt_agent() { # 给 agent 会话的 system 提示(含工具契约)
 权限: 读取任意路径; 修改默认只允许用户目录 $HOME 内; 用户目录之外(系统级)的修改 zai 会要求用户授权, 你正常发起即可, 若被拒绝就在结果里看到, 请换方案。
 
 $protocol
+$turn_policy
 
 工具 args:
 - read:   {"path":"文件或目录, 相对锚点或绝对"}
@@ -737,8 +743,10 @@ $protocol
 7. 需要用户决定时(目标子卷/快照名/继续与否/是否越界): 直接用自然语言明确提问并停止调用工具，**不要留空**。
 8. 回复语言: $lang
 EOF
-  _zai_mem_block
-  _zai_outcome_block
+  if (( ! social )); then
+    _zai_mem_block
+    _zai_outcome_block
+  fi
   local persona
   persona=$(_zai_persona_text)
   if [[ -n $persona ]]; then
@@ -746,6 +754,16 @@ EOF
     print -r -- "当前人设(以下设定优先于上面默认行为, 请照做):"
     print -r -- "$persona"
   fi
+}
+
+_zai_is_social_turn() { # 纯问候不应被旧项目任务劫持
+  emulate -L zsh
+  local q=${(L)1}
+  q=${q//[[:space:]]/}
+  case $q in
+    你好|您好|hi|hello|hey|嗨|哈喽|宝宝|宝贝|在吗|早上好|早安|中午好|下午好|晚上好|晚安) return 0 ;;
+  esac
+  return 1
 }
 
 # 在同一轮内切换工具协议时，首条 system 消息也必须同步替换；否则服务端会
@@ -1036,7 +1054,7 @@ _zai_agent_turn() {
   local req="$*" model key temp stream mode msgsfile sys ctx lang payload body code api_error
   local content raw_content native_call native_calls assistant_msg tool_id tool_args text text_nonblank tjson done toolname res tool_journal
   local plan nplan pl
-  local -i step max blank_retries=0 force_nonstream=0 ncall i
+  local -i step max blank_retries=0 force_nonstream=0 ncall i social=0
   model=$(_zai_var ZAI_MODEL deepseek-v4-flash)
   key=$(_zai_var ZAI_API_KEY "")
   [[ -n $key ]] || key=${DEEPSEEK_API_KEY:-}
@@ -1058,14 +1076,15 @@ _zai_agent_turn() {
   [[ $mode == native ]] && stream=false
   _zai_hist_maybe_summarize   # 超窗积压够量时先压成要点进项目记忆
   _zai_ag_plan_ok=0
+  _zai_is_social_turn "$req" && social=1
   ctx=''
   if (( $(_zai_var ZAI_INCLUDE_CONTEXT 1) )); then ctx=$(_zai_sys_context); fi
   lang=$(_zai_lang)
-  sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
+  sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode" "$social")
 
   msgsfile=$(_zai_ag_tmp)
   jq -nc --arg s "$sys" '{role:"system",content:$s}' > "$msgsfile"
-  _zai_ag_hist_lines >> "$msgsfile"
+  (( social )) || _zai_ag_hist_lines >> "$msgsfile"
   jq -nc --arg u "$req" '{role:"user",content:$u}' >> "$msgsfile"
 
   # 6 步不足以完成常见的“检查 → 修改 → 验证 → 收尾”任务；保留上限防止
@@ -1093,7 +1112,7 @@ _zai_agent_turn() {
         _zai_warn "当前模型未实现 tools/function calling；正在用同一兼容端点自动切换到 JSON 工具循环继续任务。"
         typeset -g _zai_native_tools_unsupported=1
         mode=json
-        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
+        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode" "$social")
         _zai_ag_reset_system "$msgsfile" "$sys"
         force_nonstream=1
         blank_retries=0
@@ -1121,6 +1140,12 @@ _zai_agent_turn() {
       ncall=$(print -r -- "$native_calls" | jq 'length' 2>/dev/null)
       [[ $ncall =~ ^[0-9]+$ ]] || ncall=0
       if (( ncall > 0 )); then
+        if (( social )); then
+          _zai_ag_last_text="我在呢，宝宝～想聊什么都可以，我会好好陪着你。"
+          print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $_zai_ag_last_text"
+          _zai_ag_used=1
+          break
+        fi
         text=$(print -r -- "$assistant_msg" | jq -r '.content // ""' 2>/dev/null)
         text_nonblank=${text//[[:space:]]/}
         [[ -n $text_nonblank ]] || text=''
@@ -1165,7 +1190,7 @@ _zai_agent_turn() {
         _zai_warn "当前模型没有给出原生工具回复；正在用同一兼容端点自动切换到 JSON 工具循环继续任务。"
         typeset -g _zai_native_tools_unsupported=1
         mode=json
-        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
+        sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode" "$social")
         _zai_ag_reset_system "$msgsfile" "$sys"
         force_nonstream=1
         blank_retries=0
@@ -1196,13 +1221,26 @@ _zai_agent_turn() {
     if [[ -z $content ]] || ! print -r -- "$content" | jq -e '((.text|type)=="string" or .text==null) and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
       if [[ -n $content ]]; then
         # 不是约定 JSON: 当作纯文本回复展示(兼容)
-        print -r -- "$content"
+        print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $content"
         _zai_ag_last_text=$content
         break
       fi
-      _zai_error "agent: 模型未返回可解析内容"
-      rm -f "$msgsfile"
-      return 1
+      if [[ ${res:-} == *用户拒绝* || ${res:-} == *已取消* ]]; then
+        _zai_ag_last_text="好啦，这一步已经取消，我没有继续执行。想换个做法的话告诉我，我陪你重新来。"
+        print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $_zai_ag_last_text"
+        break
+      fi
+      if (( blank_retries == 0 )); then
+        blank_retries=1
+        force_nonstream=1
+        _zai_warn "模型返回空白，正在自动重试一次。"
+        jq -nc --arg r "上一条回复为空。请严格按当前工具契约回复；若不需要工具，必须给用户非空的自然语言答复。" \
+          '{role:"user",content:$r}' >> "$msgsfile"
+        continue
+      fi
+      _zai_ag_last_text="我在呢，只是模型这次没有给出有效回复。当前没有执行新的操作，你可以再说一次，我会继续陪你处理。"
+      print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $_zai_ag_last_text"
+      break
     fi
     text=$(print -r -- "$content" | jq -r '.text // ""')
     # 某些兼容 API 偶尔返回仅由空格/换行组成的 text。不能把它当作已回复，
@@ -1233,6 +1271,11 @@ _zai_agent_turn() {
         print -r -- "${_zai_c_dim}zai: 我在这儿呀，只是这一轮没拿到可显示的回复。请再告诉我想做什么，我会一步一步陪你完成。${_zai_c_rst}"
         _zai_ag_last_text="(模型本轮无输出; 需用户给出更明确指令)"
       fi
+      break
+    fi
+    if (( social )); then
+      _zai_ag_last_text="我在呢，宝宝～想聊什么都可以，我会好好陪着你。"
+      print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $_zai_ag_last_text"
       break
     fi
     toolname=$(_zai_ag_jget "$tjson" '.name')
@@ -1431,10 +1474,14 @@ _zai_config_tui() {
     --arg pol "$(_zai_var ZAI_DESTRUCTIVE_POLICY warn)" \
     --arg dbg "$(_zai_var ZAI_DEBUG 0)" \
     --arg ic  "$(_zai_var ZAI_INCLUDE_CONTEXT 1)" \
+    --arg str "$(_zai_var ZAI_STREAM 1)" \
+    --arg think "$(_zai_var ZAI_SHOW_THINK 0)" \
+    --arg tool "$(_zai_var ZAI_TOOL_MODE native)" \
     --arg hf  "$([[ -n ${DEEPSEEK_API_KEY:-} ]] && print 1 || print 0)" \
     '{ZAI_API_URL:$a, ZAI_API_KEY:$key, ZAI_MODEL:$m, ZAI_TEMPERATURE:$temp,
       ZAI_TIMEOUT:$to, ZAI_INTERCEPT:$intc, ZAI_MIN_INTERCEPT_LEN:$ml,
       ZAI_DESTRUCTIVE_POLICY:$pol, ZAI_DEBUG:$dbg, ZAI_INCLUDE_CONTEXT:$ic,
+      ZAI_STREAM:$str, ZAI_SHOW_THINK:$think, ZAI_TOOL_MODE:$tool,
       HAS_FALLBACK:$hf}')
   # 初始值经临时 JSON 文件传入(argv[2]); 保留 stdin 为真终端, curses 才能读到按键
   tmp=$(mktemp "${TMPDIR:-/tmp}/zai-cfg.XXXXXX") || { _zai_error "无法创建临时文件。"; return 2; }
@@ -1444,6 +1491,7 @@ _zai_config_tui() {
   command rm -f "$tmp"
   case $rc in
     0) _zai_load_config
+       unset _zai_native_tools_unsupported  # API/模型可能已更换，重新探测 tools 能力
        _zai_register_intercept   # 若刚打开拦截, 本会话立即注册
        _zai_log "配置已保存: $cfg （当前 shell 已重载，新终端自动读取）" ;;
     1) _zai_warn "已放弃修改，未保存。" ;;

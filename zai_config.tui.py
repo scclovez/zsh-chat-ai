@@ -19,6 +19,9 @@ import json
 import os
 import shlex
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 
 # 字段顺序即显示/保存顺序
 ORDER = [
@@ -79,6 +82,58 @@ CHOICES = {
 INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN"}
 FLOATS = {"ZAI_TEMPERATURE"}
 SECRET = {"ZAI_API_KEY"}
+
+
+def models_url(api_url):
+    """从 OpenAI-compatible completion 地址推导同一 API 根下的 /models。"""
+    raw = (api_url or "").strip()
+    if not raw:
+        raise ValueError("API 地址为空")
+    p = urllib.parse.urlsplit(raw)
+    if p.scheme not in ("http", "https") or not p.netloc:
+        raise ValueError("API 地址必须是 http(s) URL")
+    path = p.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")] + "/models"
+    elif path.endswith("/responses"):
+        path = path[: -len("/responses")] + "/models"
+    elif not path.endswith("/models"):
+        path = path + "/models" if path else "/models"
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, path, "", ""))
+
+
+def fetch_models(api_url, api_key, timeout="10"):
+    """读取标准 GET /models 响应，返回 (模型 ID 列表, 错误文本)。"""
+    try:
+        seconds = min(10, max(3, int(float(timeout or 10))))
+    except (TypeError, ValueError):
+        seconds = 10
+    try:
+        url = models_url(api_url)
+        headers = {"Accept": "application/json", "User-Agent": "zsh-chat-ai/1"}
+        key = (api_key or os.environ.get("DEEPSEEK_API_KEY", "")).strip()
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=seconds) as resp:
+            body = resp.read(2 * 1024 * 1024)
+        obj = json.loads(body.decode("utf-8"))
+        data = obj.get("data") if isinstance(obj, dict) else None
+        if not isinstance(data, list):
+            raise ValueError("响应缺少 data 数组")
+        names = sorted(
+            {str(item["id"]) for item in data if isinstance(item, dict) and item.get("id")},
+            key=str.casefold,
+        )
+        if not names:
+            raise ValueError("data 中没有模型 ID")
+        return names, ""
+    except urllib.error.HTTPError as e:
+        return [], "获取模型失败: HTTP %s" % e.code
+    except urllib.error.URLError as e:
+        return [], "获取模型失败: %s" % getattr(e, "reason", e)
+    except Exception as e:  # noqa: BLE001
+        return [], "获取模型失败: %s" % e
 
 
 def mask(v):
@@ -366,6 +421,46 @@ def persona_page(stdscr):
     return changed
 
 
+def model_page(stdscr, names, current):
+    """模型选择页。返回选中的模型；q/Esc 返回 None。"""
+    if not names:
+        return None
+    cur = names.index(current) if current in names else 0
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        try:
+            stdscr.addnstr(0, 0, "选择模型    j/k 移动 · Enter 选用 · q 返回", max(0, w - 1))
+            maxr = max(1, h - 4)
+            off = min(max(0, cur - maxr // 2), max(0, len(names) - maxr))
+            y = 2
+            for i in range(off, min(len(names), off + maxr)):
+                mark = "> " if i == cur else "  "
+                tag = "  [当前]" if names[i] == current else ""
+                attr = curses.A_REVERSE if i == cur else curses.A_NORMAL
+                stdscr.addnstr(y, 0, mark + names[i] + tag, max(0, w - 1), attr)
+                y += 1
+            stdscr.addnstr(h - 1, 0, "共 %d 个模型" % len(names), max(0, w - 1))
+        except curses.error:
+            pass
+        stdscr.refresh()
+        c = stdscr.getch()
+        if c == curses.KEY_RESIZE:
+            continue
+        if c in (curses.KEY_UP, ord("k"), ord("K")):
+            cur = (cur - 1) % len(names)
+        elif c in (curses.KEY_DOWN, ord("j"), ord("J")):
+            cur = (cur + 1) % len(names)
+        elif c in (10, 13, curses.KEY_ENTER):
+            return names[cur]
+        elif c in (ord("q"), ord("Q"), 27):
+            return None
+
+
 def main(stdscr):
     init = {}
     if len(sys.argv) > 2:
@@ -388,6 +483,21 @@ def main(stdscr):
         vals[k] = DEFAULTS.get(k, "") if raw is None else str(raw)
     if "ZAI_DESTRUCTIVE_POLICY" in vals and vals["ZAI_DESTRUCTIVE_POLICY"] not in CHOICES["ZAI_DESTRUCTIVE_POLICY"]:
         vals["ZAI_DESTRUCTIVE_POLICY"] = "warn"
+
+    # 启动 TUI 时自动读取一次模型列表。失败不影响手动填写模型。
+    stdscr.erase()
+    try:
+        stdscr.addstr(0, 0, "正在从兼容端点获取模型列表…")
+        stdscr.refresh()
+    except curses.error:
+        pass
+    model_names, model_error = fetch_models(
+        vals["ZAI_API_URL"], vals["ZAI_API_KEY"], vals["ZAI_TIMEOUT"]
+    )
+    model_status = (
+        "已获取 %d 个模型；在“模型”项按 Enter 选择，r 可刷新。" % len(model_names)
+        if model_names else model_error + "；模型仍可手动填写，r 可重试。"
+    )
 
     order = ORDER
     n = len(order)
@@ -427,7 +537,7 @@ def main(stdscr):
             continue
 
         stdscr.erase()
-        title = "zsh-chat-ai 配置   操作: ↑/↓ 或 j/k 移动 · Enter 编辑/切换 · Esc 取消编辑 · s 保存 · p 人设 · q 退出"
+        title = "zsh-chat-ai 配置   ↑/↓ 移动 · Enter 编辑/选择 · r 刷新模型 · s 保存 · p 人设 · q 退出"
         try:
             stdscr.addnstr(0, 0, title, w)
             y = 2
@@ -440,6 +550,7 @@ def main(stdscr):
                 stdscr.addnstr(y, 0, text, w, attr)
                 y += 1
             cfg = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else ""
+            stdscr.addnstr(h - 3, 0, model_status, w)
             stdscr.addnstr(h - 2, 0, "[s] 保存并退出      [q] 退出不保存      config: " + cfg, w)
             if editing:
                 k = order[cur]
@@ -481,6 +592,14 @@ def main(stdscr):
                 else:
                     vals[k] = buf
                 editing = False
+                if k in ("ZAI_API_URL", "ZAI_API_KEY"):
+                    model_names, model_error = fetch_models(
+                        vals["ZAI_API_URL"], vals["ZAI_API_KEY"], vals["ZAI_TIMEOUT"]
+                    )
+                    model_status = (
+                        "已自动刷新 %d 个模型；在“模型”项按 Enter 选择。" % len(model_names)
+                        if model_names else model_error + "；模型仍可手动填写。"
+                    )
             elif c == 27:
                 editing = False
             elif c in (8, 127, curses.KEY_BACKSPACE):
@@ -505,9 +624,31 @@ def main(stdscr):
                     except ValueError:
                         idx = 0
                     vals[k] = opts[(idx + 1) % len(opts)]
+                elif k == "ZAI_MODEL" and model_names:
+                    selected = model_page(stdscr, model_names, vals[k])
+                    if selected:
+                        vals[k] = selected
+                        model_status = "已选择模型: " + selected
                 else:  # 文本 / 数字 / 密钥 → 进入编辑
                     editing = True
                     buf = vals[k]
+            elif c in (ord("r"), ord("R")):
+                stdscr.erase()
+                try:
+                    stdscr.addstr(0, 0, "正在刷新模型列表…")
+                    stdscr.refresh()
+                except curses.error:
+                    pass
+                model_names, model_error = fetch_models(
+                    vals["ZAI_API_URL"], vals["ZAI_API_KEY"], vals["ZAI_TIMEOUT"]
+                )
+                model_status = (
+                    "已获取 %d 个模型；在“模型”项按 Enter 选择。" % len(model_names)
+                    if model_names else model_error + "；模型仍可手动填写。"
+                )
+            elif c in (ord("e"), ord("E")) and order[cur] == "ZAI_MODEL":
+                editing = True
+                buf = vals[order[cur]]
             elif c in (ord("s"), ord("S")):
                 save = True
                 break
