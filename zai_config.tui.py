@@ -53,7 +53,7 @@ LABELS = {
     "ZAI_DESTRUCTIVE_POLICY": "危险命令策略",
     "ZAI_INCLUDE_CONTEXT": "发送系统上下文",
     "ZAI_DEBUG": "调试输出(脱敏)",
-    "ZAI_STREAM": "流式接收(整包等待 = 关)",
+    "ZAI_STREAM": "实时滚动输出(整包等待 = 关)",
     "ZAI_SHOW_THINK": "展开显示思考链",
     "ZAI_TOOL_MODE": "工具协议(native / json)",
 }

@@ -66,6 +66,7 @@ zai: 我先看一下相关代码。
 
 - **能做什么**：闲聊、问答，也可以读文件 / 搜代码 / 执行命令 / 改代码 / 新建文件，多步直到完成或你叫停；
 - **原生工具循环**：默认使用 OpenAI 兼容的 Chat Completions `tools` / `tool_calls` / `role: tool` 协议；不依赖 Responses API、ChatGPT 或某一家服务商。只要端点实现该协议即可使用；
+- **实时流式反馈**：等待首个 token 时显示旋转状态和已等待秒数；正文到达后立即逐段输出。原生工具调用的 `id`、名称和分片参数会在后台完整拼接，不影响 Agent 继续执行；旧 JSON 工具协议也只滚动显示其中的自然语言，不泄漏内部 JSON；
 - **确认策略**：`read`/`grep`/`ls` 等只读操作自动执行；`shell` 沿用命令确认与危险命令门禁；**`edit`/`create` 改文件前先展示 diff，你按 y/N 决定**；
 - **权限**：默认可修改你自己目录（`$HOME`）内的文件；`$HOME` 之外（系统级，如 `/etc`）**每次会弹"请求权限"**，同意才放行；
 - 会话内斜杠命令：`/persona` 人设 · `/remember [-g]` 记住 · `/mem` 看记忆 · `/forget [-g]` 删记忆 · `/new` 清空 · `/hist` 历史 · `/dir` 锚点 · `/help` · `/quit` 退出；
@@ -90,9 +91,9 @@ TUI 打开时会根据当前 Chat Completions 地址自动请求同一 API 根�
 | `ZAI_INTERCEPT` | `1` | `0` = 关闭"直接输入中文"的自动拦截 |
 | `ZAI_SESSION_IDLE_MINUTES` | `30` | 当前目录会话空闲多少分钟后自动开启新会话；`0` = 关闭超时 |
 | `ZAI_DESTRUCTIVE_POLICY` | `warn` | 高风险 shell 命令策略：`warn` 要求输入 `f`；`block` 直接拒绝；`allow` 仍需 y/N 确认 |
-| `ZAI_STREAM` | `1` | `json` 兼容模式下：`1` = 流式接收，`0` = 整包等待；`native` 工具循环为完整保留调用 ID 与参数，固定使用整包响应 |
+| `ZAI_STREAM` | `1` | `1` = 等待时显示动态状态并实时滚动输出正文；同时支持原生工具模式和 JSON 兼容模式。`0` = 整包等待 |
 | `ZAI_TOOL_MODE` | `native` | `native` = 标准 Chat Completions function calling（推荐）；若端点返回“不支持 tools”，会在同一端点自动降级为 `json` 旧协议；也可手动设为 `json` |
-| `ZAI_SHOW_THINK` | `0` | 默认**静默等待**（不显示思考链/占位行），结果直接显示；`1` = 实时展开模型的思考过程 |
+| `ZAI_SHOW_THINK` | `0` | 默认只显示动态等待状态和正文；`1` = 在正文前实时展开兼容模型提供的思考字段 |
 | `ZAI_SESSION` | `1` | `0` = 关闭"按目录续接会话"的记忆 |
 | `ZAI_MEMORY` | `1` | `0` = 关闭记忆（不注入、不记录） |
 | `ZAI_SUMMARIZE` | `1` | 会话超窗时自动把旧对话压成要点进项目记忆；`0` = 只截断不摘要 |
@@ -107,12 +108,12 @@ TUI 打开时会根据当前 Chat Completions 地址自动请求同一 API 根�
 
 ## 常见问题
 
-- **转圈后报错 / 没反应**：多半是网络或 key 问题，检查 `curl -i https://api.deepseek.com/models` 能否连通。
+- **转圈后报错**：动态状态会显示已经等待的秒数；若最终失败，多半是网络或 key 问题，检查 `curl -i https://api.deepseek.com/models` 能否连通。
 - **报 `401/403`**：API key 不对，检查 `~/.zshrc` 里的 `DEEPSEEK_API_KEY`。
 - **中文句子在终端里显示红色**：正常，那是语法高亮对"未知命令"的着色，回车后就会走 AI。
 - **想换别的 AI 服务**：`ai -config` 里填任意 OpenAI 兼容的 API 地址和 Key 即可。
 - **AI 返回的东西不合预期**：重新描述需求试试，或换更强的模型（`ai -config` 里改）。
-- **想不想看模型的"思考过程"？** 默认是**静默等待**（和 Claude 一样不显示思考链、也没有"思考中…"占位），结果准备好后直接输出。想看实时思考可 `export ZAI_SHOW_THINK=1`（或 `ai -config` 打开"展开显示思考链"）。
+- **想不想看模型的"思考过程"？** 默认只显示动态等待状态和实时正文，不展开内部思考内容；想看兼容模型提供的思考字段，可 `export ZAI_SHOW_THINK=1`（或 `ai -config` 打开"展开显示思考链"）。
 
 ## 安全说明
 

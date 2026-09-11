@@ -195,32 +195,11 @@ _zai_api_call() {
   return 0
 }
 
-# ---------------------------------------------------------------- 流式调用(实时显示思考内容)
+# ---------------------------------------------------------------- 流式调用(实时显示等待状态、思考内容与最终文字)
 # 请求 stream=true 后逐行读 SSE:
 #   - delta.reasoning_content(模型的思考) → 实时打印到终端(手动折行并记录占行数);
-#   - 第一个 delta.content(结果)到达 → 立刻把整块思考区清掉, 再走“展示→确认”。
-# 模型不返回思考时退化为原来的“思考中…”占位行; ZAI_STREAM=0 走上面的整包请求。
-_zai_field_raw() { # 取一行 JSON 里某字符串字段的“原文”(不反转义, 原样累积; 转义跨块也不破坏)
-  emulate -L zsh
-  local json=$1 field=$2 rest ch
-  local -i i n
-  _zai_fraw=''
-  rest=${json#*"\"$field\":\""}
-  [[ $rest == $json ]] && return 1
-  n=${#rest}
-  for (( i=1; i<=n; i++ )); do
-    ch=${rest[i]}
-    if [[ $ch == '\' ]]; then
-      _zai_fraw+="${ch}${rest[i+1]}"
-      (( i += 1 ))
-      continue
-    fi
-    [[ $ch == '"' ]] && return 0
-    _zai_fraw+=$ch
-  done
-  return 0
-}
-
+#   - delta.content(结果) → 立即增量打印；原生 tool_calls 分片在后台无损拼接。
+# 模型尚未返回可显示内容时显示动态等待状态; ZAI_STREAM=0 走上面的整包请求。
 _zai_think_begin() { # 首个思考文本到达: 抹掉占位行, 开启思考区计数
   emulate -L zsh
   local L
@@ -283,47 +262,145 @@ _zai_think_close() { # 出结果/流结束: 复位灰色, 光标回到思考区�
   return 0
 }
 
+# 服务端尚未给出可显示 token 时持续刷新同一行。它只表示请求仍在运行，
+# 不伪造模型进度；收到正文或展开的思考内容后立即停止。
+_zai_wait_spinner() {
+  emulate -L zsh
+  local stop=$1 model=$2 frame
+  local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local -i i=1 started=$SECONDS elapsed
+  while [[ ! -s $stop ]]; do
+    frame=$frames[$i]
+    elapsed=$(( SECONDS - started ))
+    print -rn -- $'\r\e[2K'"${_zai_c_dim}zai: $frame 正在处理 · ${elapsed}s ($model)${_zai_c_rst}"
+    (( i = i % ${#frames} + 1 ))
+    sleep 0.12
+  done
+}
+
+_zai_stream_stop_wait() {
+  emulate -L zsh
+  if (( ${_zai_s_spinner_on:-0} )); then
+    print -r -- stop > "$_zai_s_stopf"
+    wait "$_zai_s_spinner_pid" 2>/dev/null
+    _zai_s_spinner_on=0
+    print -rn -- $'\r\e[2K'
+  elif (( ${_zai_s_bar:-0} )); then
+    _zai_s_bar=0
+    print -rn -- $'\r\e[2K'
+  fi
+}
+
+_zai_stream_emit() { # $1=新增的可显示正文；首次调用时输出 zai 前缀
+  emulate -L zsh
+  local frag=$1
+  [[ -n $frag ]] || return 0
+  if (( ! ${_zai_s_text_on:-0} )); then
+    if (( ${_zai_s_show:-0} && ${_zai_s_reason_on:-0} )); then
+      _zai_think_close
+    else
+      _zai_stream_stop_wait
+    fi
+    _zai_s_text_on=1
+    _zai_s_res_done=1
+    print -rn -- "${_zai_c_cyan}zai:${_zai_c_rst} "
+  fi
+  print -rn -- "$frag"
+  _zai_s_shown+=$frag
+}
+
+# JSON 工具兼容模式的正文自身是一个 JSON 对象。只抽取其中 text 字符串
+# 已经完整、可解码的前缀，避免把 done/tool 等内部协议显示给用户。
+_zai_json_partial_text() {
+  emulate -L zsh
+  local doc=$1 rest ch raw=''
+  local -i i n
+  _zai_jtext=''
+  rest=$doc
+  while [[ $rest == [[:space:]]* ]]; do rest=${rest#?}; done
+  [[ ${rest[1]} == '{' ]] || return 1
+  rest=${rest[2,-1]}
+  while [[ $rest == [[:space:]]* ]]; do rest=${rest#?}; done
+  # 只接受契约规定的首个顶层 text 字段；不能误把 tool.args 内同名字段输出。
+  [[ ${rest[1,6]} == '"text"' ]] || return 1
+  rest=${rest[7,-1]}
+  rest=${rest#*:}
+  while [[ $rest == [[:space:]]* ]]; do rest=${rest#?}; done
+  [[ ${rest[1]} == '"' ]] || return 1
+  rest=${rest[2,-1]}
+  n=${#rest}
+  for (( i=1; i<=n; i++ )); do
+    ch=${rest[i]}
+    if [[ $ch == '\\' ]]; then
+      (( i < n )) || break
+      raw+="${ch}${rest[i+1]}"
+      (( i++ ))
+      continue
+    fi
+    [[ $ch == '"' ]] && break
+    raw+=$ch
+  done
+  _zai_jtext=$(print -rn -- "\"$raw\"" | jq -r . 2>/dev/null) || return 1
+  return 0
+}
+
+_zai_json_string_value() { # 解码 JSON 字符串且保留值末尾自带的换行
+  emulate -L zsh
+  local json=$1 filter=$2 marker=$'\x1e'
+  _zai_s_value=$(print -r -- "$json" | jq -jr "$filter" 2>/dev/null; print -rn -- "$marker")
+  _zai_s_value=${_zai_s_value%$marker}
+}
+
 _zai_sse_line() { # 处理一行 SSE / 尾部哨兵; 状态存全局 _zai_s_* (在流式子 shell 内使用)
   emulate -L zsh
-  local line=$1 data frag
+  local line=$1 data decoded current suffix
   case $line in
     EXIT:<->) _zai_s_exit=${line#EXIT:}; return 0 ;;
     <->)      _zai_s_code=$line;       return 0 ;;   # curl -w 追加的 http 码
-    ''|'data: [DONE]') return 0 ;;
-    'data: '*) ;;
+    ''|'data: [DONE]'|'data:[DONE]') return 0 ;;
+    'data: '*) data=${line#data: } ;;
+    'data:'*)  data=${line#data:} ;;
     *)  _zai_s_err+="${line}"$'\n'; return 0 ;;       # 非 SSE(HTTP 错误响应体等)
   esac
-  data=${line#data: }
+  [[ $_zai_s_mode == native ]] && print -r -- "$data" >> "$_zai_s_eventf"
   if (( _zai_s_show )); then   # 展开模式才显示思考文本(默认折叠)
-    if _zai_field_raw "$data" reasoning_content || _zai_field_raw "$data" reasoning; then
-      frag=$_zai_fraw
-      if (( ! _zai_s_res_done )) && [[ -n $frag ]]; then
-        (( _zai_s_reason_on )) || { _zai_s_reason_on=1; _zai_think_begin }
-        _zai_think_print "$frag"
+    if print -r -- "$data" | jq -e '((.choices[0].delta.reasoning_content // .choices[0].delta.reasoning) | type) == "string"' >/dev/null 2>&1; then
+      _zai_json_string_value "$data" '.choices[0].delta.reasoning_content // .choices[0].delta.reasoning // empty'
+      decoded=$_zai_s_value
+      if (( ! _zai_s_res_done )) && [[ -n $decoded ]]; then
+        if (( ! _zai_s_reason_on )); then
+          _zai_stream_stop_wait
+          _zai_s_reason_on=1
+          _zai_think_begin
+        fi
+        _zai_think_print "$decoded"
       fi
     fi
   fi
-  if _zai_field_raw "$data" content && [[ -n $_zai_fraw ]]; then
-    frag=$_zai_fraw
-    if (( ! _zai_s_res_done )); then
-      _zai_s_res_done=1
-      if (( _zai_s_show )); then
-        _zai_think_close    # 展开模式: 出结果 → 关掉思考区
-      else
-        (( _zai_s_bar )) && { _zai_s_bar=0; print -rn -- $'\r\e[2K'"${_zai_c_rst}"; }
+  if print -r -- "$data" | jq -e '(.choices[0].delta.content | type) == "string" and (.choices[0].delta.content | length) > 0' >/dev/null 2>&1; then
+    _zai_json_string_value "$data" '.choices[0].delta.content'
+    decoded=$_zai_s_value
+    _zai_s_decoded+=$decoded
+    if [[ $_zai_s_mode == native ]]; then
+      _zai_stream_emit "$decoded"
+    elif _zai_json_partial_text "$_zai_s_decoded"; then
+      current=$_zai_jtext
+      if (( ${#current} > ${#_zai_s_shown} )); then
+        suffix=${current[$(( ${#_zai_s_shown} + 1 )),-1]}
+        _zai_stream_emit "$suffix"
       fi
     fi
-    _zai_s_raw+=$frag
   fi
   return 0
 }
 
 # 流式调用主流程: 成功后设 _zai_http_code / _zai_api_body，供 agent 统一解析。
-_zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(Claude 式静默等待)
+# $5=native|json；原生模式会把分片的 tool_calls 重新组装成标准 assistant 消息。
+_zai_api_stream() {
   emulate -L zsh
-  local payload=$1 model=$2 key=$3 quiet=${4:-0}
-  local url timeout rawf codef errf rcbar bodyerr em
-  local raw ct line
+  local payload=$1 model=$2 key=$3 quiet=${4:-0} mode=${5:-json}
+  local url timeout rawf codef errf rcbar shownf eventf stopf bodyerr em
+  local raw line events_body
   local -i rc
   url=$(_zai_var ZAI_API_URL https://api.deepseek.com/chat/completions)
   timeout=$(_zai_var ZAI_TIMEOUT 300)
@@ -332,44 +409,51 @@ _zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(C
   codef=$(mktemp 2>/dev/null)  || codef="/tmp/zai_code.$$"
   errf=$(mktemp 2>/dev/null)   || errf="/tmp/zai_err.$$"
   rcbar=$(mktemp 2>/dev/null)  || rcbar="/tmp/zai_rc.$$"
+  shownf=$(mktemp 2>/dev/null) || shownf="/tmp/zai_shown.$$"
+  eventf=$(mktemp 2>/dev/null) || eventf="/tmp/zai_events.$$"
+  stopf=$(mktemp 2>/dev/null)  || stopf="/tmp/zai_stop.$$"
   local -i att=1
   while :; do
-    _zai_s_exit=0; _zai_s_code=''; _zai_s_raw=''; _zai_s_err=''
-    _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0
-    _zai_s_rows=0; _zai_s_col=0
-    _zai_s_bar=0
-    (( quiet )) && _zai_s_bar=0 || _zai_s_bar=1
+    : > "$rawf"; : > "$eventf"; : > "$shownf"; : > "$stopf"
+    _zai_s_exit=0; _zai_s_code=''; _zai_s_decoded=''; _zai_s_err=''
+    _zai_s_reason_on=0; _zai_s_res_done=0; _zai_s_show=0; _zai_s_text_on=0
+    _zai_s_rows=0; _zai_s_col=0; _zai_s_shown=''; _zai_s_mode=$mode
+    _zai_s_bar=0; _zai_s_eventf=$eventf; _zai_s_stopf=$stopf
     (( $(_zai_var ZAI_SHOW_THINK 0) )) && _zai_s_show=1
-    if (( ! quiet )); then
-      if (( _zai_s_show )); then
-        print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-      else
-        print -rn -- "${_zai_c_dim}zai: 思考中 ($model)…${_zai_c_rst}"
-      fi
-    fi
     (
       # 子 shell: 显示与收集的状态在结束时落盘, 避免管道/替换的变量隔离问题
+      _zai_s_spinner_on=0
+      if (( ! quiet )); then
+        _zai_wait_spinner "$stopf" "$model" &
+        _zai_s_spinner_pid=$!
+        _zai_s_spinner_on=1
+      fi
+      trap 'print -r -- stop > "$stopf" 2>/dev/null' EXIT INT TERM
       while IFS= read -r line; do
         line=${line%$'\r'}          # 兼容 CRLF 响应的行尾回车
         _zai_sse_line "$line"
-      done < <(curl -sS --max-time "$timeout" \
+      done < <(curl -N -sS --max-time "$timeout" \
           -H 'Content-Type: application/json' \
           -H "Authorization: Bearer $key" \
           --data "$payload" \
           -w $'\n%{http_code}\n' "$url" 2>/dev/null; print -r -- "EXIT:$?")
-      # 流结束仍未出结果: 显示过思考(超时/中断) → 保留思考便于查看, 不整块清除; 只复位颜色
-      if (( ! _zai_s_res_done )); then
-        if (( _zai_s_bar )); then
-          print -rn -- $'\r\e[2K'"${_zai_c_rst}"   # 全程只显示过占位行 → 抹掉
-        else
-          print -rn -- "${_zai_c_rst}"
-          print -r -- ""                            # 思考被中断: 留空一行再输出错误
+      # JSON text 的最后一段可能和闭合引号同块到达，再同步一次完整前缀。
+      if [[ $mode == json ]] && _zai_json_partial_text "$_zai_s_decoded"; then
+        if (( ${#_zai_jtext} > ${#_zai_s_shown} )); then
+          _zai_stream_emit "${_zai_jtext[$(( ${#_zai_s_shown} + 1 )),-1]}"
         fi
       fi
-      print -r -- "$_zai_s_raw"  > "$rawf"
-      print -r -- "$_zai_s_code" > "$codef"
-      print -r -- "$_zai_s_err"  > "$errf"
-      print -r -- "$_zai_s_exit" > "$rcbar"
+      _zai_stream_stop_wait
+      if (( _zai_s_text_on )); then
+        print -r -- "${_zai_c_rst}"
+      elif (( _zai_s_reason_on )); then
+        print -r -- "${_zai_c_rst}"
+      fi
+      print -rn -- "$_zai_s_shown" > "$shownf"
+      print -rn -- "$_zai_s_decoded" > "$rawf"
+      print -r -- "$_zai_s_code"   > "$codef"
+      print -r -- "$_zai_s_err"    > "$errf"
+      print -r -- "$_zai_s_exit"   > "$rcbar"
     )
     rc=$(( $(<"$rcbar") ))
     if (( rc == 35 && att < 3 )); then   # SSL 瞬时失败 → 自动重试
@@ -383,8 +467,10 @@ _zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(C
   _zai_http_code=$(<"$codef")
   raw=$(<"$rawf")
   bodyerr=$(<"$errf")
-  rm -f "$rawf" "$codef" "$errf" "$rcbar"
+  _zai_stream_text=$(<"$shownf")
+  if [[ -n $_zai_stream_text ]]; then _zai_stream_displayed=1; else _zai_stream_displayed=0; fi
   if (( rc )); then
+    rm -f "$rawf" "$codef" "$errf" "$rcbar" "$shownf" "$eventf" "$stopf"
     case $rc in
       7)  em="无法连接到 $url (网络/DNS?)" ;;
       28) em="请求超时(超过 ${timeout}s): 思考/生成过长被中断; 可调大: export ZAI_TIMEOUT=600 后重试" ;;
@@ -395,16 +481,43 @@ _zai_api_stream() { # $4=quiet: 非空则不打“思考中/折叠”占位行(C
     return 1
   fi
   if [[ -z $_zai_http_code ]]; then
+    rm -f "$rawf" "$codef" "$errf" "$rcbar" "$shownf" "$eventf" "$stopf"
     _zai_error "请求失败(未收到 HTTP 响应)。"
     return 1
   fi
   if [[ $_zai_http_code != 200 ]]; then
     _zai_api_body=$bodyerr          # 交给调用方按状态码提示
+    rm -f "$rawf" "$codef" "$errf" "$rcbar" "$shownf" "$eventf" "$stopf"
     return 0
   fi
-  # 成功: 把流式 content 原文(仍是 JSON 转义串)还原成 JSON 文本, 再包成旧格式响应体
-  ct=$(print -rn -- "\"$raw\"" | jq -r . 2>/dev/null)
-  _zai_api_body=$(jq -nc --arg c "$ct" '{choices:[{message:{content:$c}}]}')
+  if [[ $mode == native && -s $eventf ]]; then
+    # Chat Completions 把每个 function.arguments 拆成若干 delta；按 index
+    # 顺序拼回 id/name/arguments，供后续 tool_call_id 循环无损使用。
+    events_body=$(jq -sc '
+      reduce .[] as $e ({content:"",calls:{}};
+        .content += ($e.choices[0].delta.content // "") |
+        reduce (($e.choices[0].delta.tool_calls // [])[]) as $tc (.;
+          (($tc.index // 0) | tostring) as $k |
+          .calls[$k].id = ((.calls[$k].id // "") + ($tc.id // "")) |
+          .calls[$k].name = ((.calls[$k].name // "") + ($tc.function.name // "")) |
+          .calls[$k].arguments = ((.calls[$k].arguments // "") + ($tc.function.arguments // ""))
+        )
+      ) as $s |
+      {choices:[{message:(
+        {role:"assistant",content:(if $s.content == "" then null else $s.content end)} +
+        (if ($s.calls | length) > 0 then
+          {tool_calls:[$s.calls | to_entries | sort_by(.key | tonumber) | .[].value |
+            {id:.id,type:"function",function:{name:.name,arguments:.arguments}}]}
+         else {} end)
+      )}]}' "$eventf" 2>/dev/null)
+    _zai_api_body=$events_body
+  elif print -r -- "$bodyerr" | jq -e '.choices | type == "array"' >/dev/null 2>&1; then
+    # 少数“兼容”服务忽略 stream=true 并直接回完整 JSON。
+    _zai_api_body=$bodyerr
+  else
+    _zai_api_body=$(jq -nc --arg c "$raw" '{choices:[{message:{content:$c}}]}')
+  fi
+  rm -f "$rawf" "$codef" "$errf" "$rcbar" "$shownf" "$eventf" "$stopf"
   return 0
 }
 
@@ -1043,11 +1156,13 @@ _zai_ag_tool_run() { # $1=tool json; 执行并把结果文本写入 _zai_ag_resu
   esac
 }
 
-_zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式; 设响应全局变量
+_zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式 $5=native|json
   emulate -L zsh
-  local payload=$1 model=$2 key=$3 force_nonstream=${4:-0}
+  local payload=$1 model=$2 key=$3 force_nonstream=${4:-0} mode=${5:-json}
+  _zai_stream_displayed=0
+  _zai_stream_text=''
   if (( ! force_nonstream && $(_zai_var ZAI_STREAM 1) )); then
-    _zai_api_stream "$payload" "$model" "$key" || return 1
+    _zai_api_stream "$payload" "$model" "$key" 0 "$mode" || return 1
   else
     _zai_api_call "$payload" "$model" "$key" || return 1
   fi
@@ -1057,7 +1172,7 @@ _zai_ag_call() { # $1 payload $2 model $3 key $4=1 时强制非流式; 设响应
 # agent 单轮多步执行
 _zai_agent_turn() {
   emulate -L zsh
-  local req="$*" model key temp stream mode msgsfile sys ctx lang payload body code api_error
+  local req="$*" model key temp stream request_stream mode msgsfile sys ctx lang payload body code api_error
   local content raw_content native_call native_calls assistant_msg tool_id tool_args text text_nonblank tjson done toolname res tool_journal
   local plan nplan pl
   local -i step max blank_retries=0 force_nonstream=0 ncall i
@@ -1077,9 +1192,6 @@ _zai_agent_turn() {
   # 本 shell 已确认当前兼容端点拒绝原生 tools 后，后续对话直接用 JSON
   # 工具循环，不再让用户每一句话先等待一次必然失败的探测。
   [[ $mode == native && ${_zai_native_tools_unsupported:-0} == 1 ]] && mode=json
-  # SSE 中 tool_calls 的 arguments 会分片；为保证所有 OpenAI 兼容端点都能
-  # 完整保留 call id 和参数，原生 tools 循环统一使用完整响应。
-  [[ $mode == native ]] && stream=false
   _zai_ag_roll_idle_session
   _zai_hist_maybe_summarize   # 超窗积压够量时先压成要点进项目记忆
   _zai_ag_plan_ok=0
@@ -1102,12 +1214,14 @@ _zai_agent_turn() {
   _zai_ag_used=0
   for (( step=1; step<=max; step++ )); do
     (( _zai_ag_hot )) && { _zai_warn "已中断本轮任务。"; _zai_ag_hot=0; break; }
-    payload=$(_zai_payload_msgs "$model" "$msgsfile" "$temp" "$stream" "$mode")
+    request_stream=$stream
+    (( force_nonstream )) && request_stream=false
+    payload=$(_zai_payload_msgs "$model" "$msgsfile" "$temp" "$request_stream" "$mode")
     if (( $(_zai_var ZAI_DEBUG 0) )); then
       _zai_warn "== [debug] agent step=$step payload =="
       print -r -- "$(_zai_redact "$payload")"
     fi
-    _zai_ag_call "$payload" "$model" "$key" "$force_nonstream" || { rm -f "$msgsfile"; return 1; }
+    _zai_ag_call "$payload" "$model" "$key" "$force_nonstream" "$mode" || { rm -f "$msgsfile"; return 1; }
     code=$_zai_http_code
     body=$_zai_api_body
     if [[ $code != 200 ]]; then
@@ -1119,7 +1233,7 @@ _zai_agent_turn() {
         mode=json
         sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
         _zai_ag_reset_system "$msgsfile" "$sys"
-        force_nonstream=1
+        force_nonstream=0
         blank_retries=0
         continue
       fi
@@ -1148,10 +1262,10 @@ _zai_agent_turn() {
         text=$(print -r -- "$assistant_msg" | jq -r '.content // ""' 2>/dev/null)
         text_nonblank=${text//[[:space:]]/}
         [[ -n $text_nonblank ]] || text=''
-        if [[ -n $text ]]; then
+        if [[ -n $text && ${_zai_stream_displayed:-0} != 1 ]]; then
           print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $text"
-          _zai_ag_last_text=$text
         fi
+        [[ -n $text ]] && _zai_ag_last_text=$text
         print -r -- "$assistant_msg" >> "$msgsfile"
         for (( i=0; i<ncall; i++ )); do
           native_call=$(print -r -- "$native_calls" | jq -c --argjson i "$i" '.[$i]' 2>/dev/null)
@@ -1190,7 +1304,7 @@ _zai_agent_turn() {
         mode=json
         sys=$(_zai_prompt_agent "$ctx" "$lang" "$mode")
         _zai_ag_reset_system "$msgsfile" "$sys"
-        force_nonstream=1
+        force_nonstream=0
         blank_retries=0
         continue
       fi
@@ -1201,8 +1315,10 @@ _zai_agent_turn() {
           '{role:"user",content:$r}' >> "$msgsfile"
         continue
       fi
-      if [[ -n $text ]]; then
+      if [[ -n $text && ${_zai_stream_displayed:-0} != 1 ]]; then
         print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $text"
+      fi
+      if [[ -n $text ]]; then
         _zai_ag_last_text=$text
         _zai_ag_used=1
       fi
@@ -1218,7 +1334,7 @@ _zai_agent_turn() {
     if [[ -z $content ]] || ! print -r -- "$content" | jq -e '((.text|type)=="string" or .text==null) and ((.done|type)=="boolean" or .done==null)' >/dev/null 2>&1; then
       if [[ -n $content ]]; then
         # 不是约定 JSON: 当作纯文本回复展示(兼容)
-        print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $content"
+        (( ${_zai_stream_displayed:-0} )) || print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $content"
         _zai_ag_last_text=$content
         break
       fi
@@ -1244,8 +1360,10 @@ _zai_agent_turn() {
     text_nonblank=${text//[[:space:]]/}
     [[ -n $text_nonblank ]] || text=''
     done=$(print -r -- "$content" | jq -r 'if .done == true then 1 else 0 end')
-    if [[ -n $text ]]; then
+    if [[ -n $text && ${_zai_stream_displayed:-0} != 1 ]]; then
       print -r -- "${_zai_c_cyan}zai:${_zai_c_rst} $text"
+    fi
+    if [[ -n $text ]]; then
       _zai_ag_last_text=$text
       _zai_ag_used=1
     fi
