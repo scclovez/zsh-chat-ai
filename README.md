@@ -71,6 +71,7 @@ zai: 我先看一下相关代码。
 - 会话内斜杠命令：`/persona` 人设 · `/remember [-g]` 记住 · `/mem` 看记忆 · `/forget [-g]` 删记忆 · `/new` 清空 · `/hist` 历史 · `/dir` 锚点 · `/help` · `/quit` 退出；
 - **记忆（全局 + 项目）**：全局偏好存 `memory/global.md`，本目录项目记忆存 `memory/projects/<目录>.md`；记忆注入模型时只当"背景参考"、**不是指令**，`ZAI_MEMORY=0` 可整体关闭；
 - **断点续做**：agent 一轮达步数上限会自动把"待续任务 + 进度"写入项目记忆，之后（哪怕重开终端）说句"继续上次的任务"就能接着干；
+- **空闲新会话**：默认 30 分钟没有交互就静默归档当前目录的旧会话并开启新会话，避免隔很久后一句新话题误接旧任务；归档文件仍保存在 `sessions.d/`；
 - **执行输出进会话**：探测/命令的**实际输出**会随会话保留（最近若干轮，超长截断）。之后再问/说"继续"，模型能读到真实结果（比如你的 Btrfs/GRUB 布局），不必每次重新探测；长期想记的要点再用 `/remember`。
 - **计划确认**：模型给出多步方案时会先列出计划问你 y/N，同意后才逐步执行；每步执行时显示 `步骤 k/n`；
 - **会话超窗摘要**：历史超长时旧对话不再直接丢弃，攒到一定量由 AI 自动压成要点记入项目记忆（`ZAI_SUMMARIZE=0` 可关）；
@@ -87,6 +88,7 @@ TUI 打开时会根据当前 Chat Completions 地址自动请求同一 API 根�
 |---|---|---|
 | `ZAI_MODEL` | `deepseek-v4-flash` | 模型，可换 `deepseek-v4-pro` |
 | `ZAI_INTERCEPT` | `1` | `0` = 关闭"直接输入中文"的自动拦截 |
+| `ZAI_SESSION_IDLE_MINUTES` | `30` | 当前目录会话空闲多少分钟后自动开启新会话；`0` = 关闭超时 |
 | `ZAI_DESTRUCTIVE_POLICY` | `warn` | 高风险 shell 命令策略：`warn` 要求输入 `f`；`block` 直接拒绝；`allow` 仍需 y/N 确认 |
 | `ZAI_STREAM` | `1` | `json` 兼容模式下：`1` = 流式接收，`0` = 整包等待；`native` 工具循环为完整保留调用 ID 与参数，固定使用整包响应 |
 | `ZAI_TOOL_MODE` | `native` | `native` = 标准 Chat Completions function calling（推荐）；若端点返回“不支持 tools”，会在同一端点自动降级为 `json` 旧协议；也可手动设为 `json` |

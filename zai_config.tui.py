@@ -32,6 +32,7 @@ ORDER = [
     "ZAI_TIMEOUT",
     "ZAI_INTERCEPT",
     "ZAI_MIN_INTERCEPT_LEN",
+    "ZAI_SESSION_IDLE_MINUTES",
     "ZAI_DESTRUCTIVE_POLICY",
     "ZAI_INCLUDE_CONTEXT",
     "ZAI_DEBUG",
@@ -48,6 +49,7 @@ LABELS = {
     "ZAI_TIMEOUT": "请求超时(秒)",
     "ZAI_INTERCEPT": "拦截未知命令(纯自然语言)",
     "ZAI_MIN_INTERCEPT_LEN": "拦截最短首词长度",
+    "ZAI_SESSION_IDLE_MINUTES": "会话空闲超时(分钟，0=关闭)",
     "ZAI_DESTRUCTIVE_POLICY": "危险命令策略",
     "ZAI_INCLUDE_CONTEXT": "发送系统上下文",
     "ZAI_DEBUG": "调试输出(脱敏)",
@@ -64,6 +66,7 @@ DEFAULTS = {
     "ZAI_TIMEOUT": "300",
     "ZAI_INTERCEPT": "1",
     "ZAI_MIN_INTERCEPT_LEN": "2",
+    "ZAI_SESSION_IDLE_MINUTES": "30",
     "ZAI_DESTRUCTIVE_POLICY": "warn",
     "ZAI_INCLUDE_CONTEXT": "1",
     "ZAI_DEBUG": "0",
@@ -79,7 +82,7 @@ CHOICES = {
     "ZAI_DESTRUCTIVE_POLICY": ("warn", "block", "allow"),
     "ZAI_TOOL_MODE": ("native", "json"),
 }
-INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN"}
+INTS = {"ZAI_TIMEOUT", "ZAI_MIN_INTERCEPT_LEN", "ZAI_SESSION_IDLE_MINUTES"}
 FLOATS = {"ZAI_TEMPERATURE"}
 SECRET = {"ZAI_API_KEY"}
 
